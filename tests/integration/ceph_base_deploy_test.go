@@ -39,11 +39,12 @@ const (
 	// UPDATE these versions when the integration test matrix changes
 	// These versions are for running a minimal test suite for more efficient tests across different versions of K8s
 	// instead of running all suites on all versions
-	blockMinimalTestVersion        = "1.12.0"
-	multiClusterMinimalTestVersion = "1.13.0"
-	helmMinimalTestVersion         = "1.14.0"
-	upgradeMinimalTestVersion      = "1.15.0"
-	smokeSuiteMinimalTestVersion   = "1.16.0"
+	// To run on multiple versions, add a comma separate list such as 1.16.0,1.17.0
+	flexDriverMinimalTestVersion   = "1.14.0"
+	multiClusterMinimalTestVersion = "1.15.0"
+	helmMinimalTestVersion         = "1.16.0"
+	upgradeMinimalTestVersion      = "1.17.0"
+	smokeSuiteMinimalTestVersion   = "1.18.0"
 )
 
 var (
@@ -61,6 +62,8 @@ func checkIfRookClusterIsInstalled(s suite.Suite, k8sh *utils.K8sHelper, opNames
 		"Make sure there is at lest 1 rook-ceph-osd present in Running state")
 	assert.True(s.T(), k8sh.CheckPodCountAndState("rook-ceph-mon", clusterNamespace, mons, "Running"),
 		fmt.Sprintf("Make sure there are %d rook-ceph-mon present in Running state", mons))
+	assert.True(s.T(), k8sh.CheckPodCountAndState("rook-ceph-crashcollector", clusterNamespace, 1, "Running"),
+		"Make sure there is at lest 1 rook-ceph-crash present in Running state")
 }
 
 func checkIfRookClusterIsHealthy(s suite.Suite, testClient *clients.TestClient, clusterNamespace string) {
@@ -100,7 +103,8 @@ type TestCluster struct {
 	T                func() *testing.T
 	namespace        string
 	storeType        string
-	useDevices       bool
+	storageClassName string
+	usePVC           bool
 	mons             int
 	rbdMirrorWorkers int
 }
@@ -111,24 +115,34 @@ func checkIfShouldRunForMinimalTestMatrix(t func() *testing.T, k8sh *utils.K8sHe
 		logger.Infof("running all tests")
 		return
 	}
-	if !k8sh.VersionMinorMatches(version) {
-		logger.Infof("Skipping test suite since kube version is not minor version %s", version)
+	versions := strings.Split(version, ",")
+	logger.Infof("checking if tests are running on k8s %q", version)
+	matchedVersion := false
+	kubeVersion := ""
+	for _, v := range versions {
+		kubeVersion, matchedVersion = k8sh.VersionMinorMatches(v)
+		if matchedVersion {
+			break
+		}
+	}
+	if !matchedVersion {
+		logger.Infof("Skipping test suite since kube version %q does not match", kubeVersion)
 		t().Skip()
 	}
-	logger.Infof("Running test suite since kube version is minor version %s", version)
+	logger.Infof("Running test suite since kube version is %q", kubeVersion)
 }
 
 // StartTestCluster creates new instance of TestCluster struct
-func StartTestCluster(t func() *testing.T, minimalMatrixK8sVersion, namespace, storeType string, useHelm, useDevices bool, mons,
-	rbdMirrorWorkers int, rookVersion string, cephVersion cephv1.CephVersionSpec) (*TestCluster, *utils.K8sHelper) {
+func StartTestCluster(t func() *testing.T, minimalMatrixK8sVersion, namespace, storeType string, useHelm bool, usePVC bool, storageClassName string, mons,
+	rbdMirrorWorkers int, rookVersion string, cephVersion cephv1.CephVersionSpec, cleanupHost bool) (*TestCluster, *utils.K8sHelper) {
 
 	kh, err := utils.CreateK8sHelper(t)
 	require.NoError(t(), err)
 	checkIfShouldRunForMinimalTestMatrix(t, kh, minimalMatrixK8sVersion)
 
-	i := installer.NewCephInstaller(t, kh.Clientset, useHelm, rookVersion, cephVersion)
+	i := installer.NewCephInstaller(t, kh.Clientset, useHelm, rookVersion, cephVersion, cleanupHost)
 
-	op := &TestCluster{i, kh, nil, t, namespace, storeType, useDevices, mons, rbdMirrorWorkers}
+	op := &TestCluster{i, kh, nil, t, namespace, storeType, storageClassName, usePVC, mons, rbdMirrorWorkers}
 
 	if rookVersion != installer.VersionMaster {
 		// make sure we have the images from a previous release locally so the test doesn't hit a timeout
@@ -143,8 +157,11 @@ func StartTestCluster(t func() *testing.T, minimalMatrixK8sVersion, namespace, s
 
 // SetUpRook is a wrapper for setting up rook
 func (op *TestCluster) Setup() {
-	isRookInstalled, err := op.installer.InstallRookOnK8sWithHostPathAndDevices(op.namespace, op.storeType,
-		op.useDevices, cephv1.MonSpec{Count: op.mons, AllowMultiplePerNode: true}, false /* startWithAllNodes */, op.rbdMirrorWorkers)
+	// Turn on DEBUG logging
+	capnslog.SetGlobalLogLevel(capnslog.DEBUG)
+
+	isRookInstalled, err := op.installer.InstallRook(op.namespace, op.storeType, op.usePVC, op.storageClassName,
+		cephv1.MonSpec{Count: op.mons, AllowMultiplePerNode: true}, false /* startWithAllNodes */, op.rbdMirrorWorkers)
 
 	if !isRookInstalled || err != nil {
 		logger.Errorf("Rook was not installed successfully: %v", err)
@@ -162,5 +179,5 @@ func (op *TestCluster) SetInstallData(version string) {}
 
 // TearDownRook is a wrapper for tearDown after Suite
 func (op *TestCluster) Teardown() {
-	op.installer.UninstallRook(op.namespace, true)
+	op.installer.UninstallRook(op.namespace)
 }

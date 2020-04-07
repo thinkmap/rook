@@ -18,11 +18,13 @@ package mds
 
 import (
 	"fmt"
+	"strconv"
 
+	"github.com/pkg/errors"
+	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
@@ -35,32 +37,54 @@ caps mds = "allow"
 `
 )
 
-func (c *Cluster) generateKeyring(m *mdsConfig, deploymentUID types.UID) error {
+func (c *Cluster) generateKeyring(m *mdsConfig) (string, error) {
 	user := fmt.Sprintf("mds.%s", m.DaemonID)
 	access := []string{"osd", "allow *", "mds", "allow", "mon", "allow profile mds"}
-	ownerRef := &metav1.OwnerReference{
-		UID:        deploymentUID,
-		APIVersion: "v1",
-		Kind:       "deployment",
-		Name:       m.ResourceName,
-	}
-	s := keyring.GetSecretStore(c.context, c.fs.Namespace, ownerRef)
+
+	// At present
+	s := keyring.GetSecretStore(c.context, c.fs.Namespace, &c.ownerRef)
 
 	key, err := s.GenerateKey(user, access)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Delete legacy key store for upgrade from Rook v0.9.x to v1.0.x
 	err = c.context.Clientset.CoreV1().Secrets(c.fs.Namespace).Delete(m.ResourceName, &metav1.DeleteOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			logger.Debugf("legacy mds key %s is already removed", m.ResourceName)
 		} else {
-			logger.Warningf("legacy mds key %s could not be removed: %+v", m.ResourceName, err)
+			logger.Warningf("legacy mds key %q could not be removed. %v", m.ResourceName, err)
 		}
 	}
 
 	keyring := fmt.Sprintf(keyringTemplate, m.DaemonID, key)
-	return s.CreateOrUpdate(m.ResourceName, keyring)
+	return keyring, s.CreateOrUpdate(m.ResourceName, keyring)
+}
+
+func (c *Cluster) setDefaultFlagsMonConfigStore(mdsID string) error {
+	monStore := config.GetMonStore(c.context, c.fs.Namespace)
+	who := fmt.Sprintf("mds.%s", mdsID)
+	configOptions := make(map[string]string)
+
+	// Set mds cache memory limit to the best appropriate value
+	if !c.fs.Spec.MetadataServer.Resources.Limits.Memory().IsZero() {
+		mdsCacheMemoryLimit := float64(c.fs.Spec.MetadataServer.Resources.Limits.Memory().Value()) * mdsCacheMemoryLimitFactor
+		configOptions["mds_cache_memory_limit"] = strconv.Itoa(int(mdsCacheMemoryLimit))
+	}
+
+	// Set mds_join_fs flag to force mds daemon to join a specific fs
+	if c.clusterInfo.CephVersion.IsAtLeastOctopus() {
+		configOptions["mds_join_fs"] = c.fs.Name
+	}
+
+	for flag, val := range configOptions {
+		err := monStore.Set(who, flag, val)
+		if err != nil {
+			return errors.Wrapf(err, "failed to set %q to %q on %q", flag, val, who)
+		}
+	}
+
+	return nil
 }

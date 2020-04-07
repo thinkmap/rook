@@ -21,36 +21,39 @@ package config
 
 import (
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/coreos/pkg/capnslog"
+	"github.com/pkg/errors"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-config")
 
-// DaemonType defines the type of a daemon. e.g., mon, mgr, osd, mds, rgw
-type DaemonType string
-
 const (
 	// MonType defines the mon DaemonType
-	MonType DaemonType = "mon"
+	MonType = "mon"
 
 	// MgrType defines the mgr DaemonType
-	MgrType DaemonType = "mgr"
+	MgrType = "mgr"
 
 	// OsdType defines the osd DaemonType
-	OsdType DaemonType = "osd"
+	OsdType = "osd"
 
 	// MdsType defines the mds DaemonType
-	MdsType DaemonType = "mds"
+	MdsType = "mds"
 
 	// RgwType defines the rgw DaemonType
-	RgwType DaemonType = "rgw"
+	RgwType = "rgw"
 
 	// RbdMirrorType defines the rbd-mirror DaemonType
-	RbdMirrorType DaemonType = "rbd-mirror"
+	RbdMirrorType = "rbd-mirror"
+
+	// CrashType defines the crash collector DaemonType
+	CrashType = "crashcollector"
 
 	// CephUser is the Linux Ceph username
 	CephUser = "ceph"
@@ -71,6 +74,9 @@ var (
 	// VarLogCephDir defines Ceph logging directory. It is made overwriteable only for unit tests where it
 	// may be needed to send data intended for /var/log/ceph to a temporary test dir.
 	VarLogCephDir = "/var/log/ceph"
+
+	// VarLibCephCrashDir defines Ceph crash reports directory.
+	VarLibCephCrashDir = path.Join(VarLibCephDir, "crash")
 )
 
 // normalizeKey converts a key in any format to a key with underscores.
@@ -98,17 +104,32 @@ func SetDefaultConfigs(
 	context *clusterd.Context,
 	namespace string,
 	clusterInfo *cephconfig.ClusterInfo,
+	networkSpec cephv1.NetworkSpec,
 ) error {
 	// ceph.conf is never used. All configurations are made in the centralized mon config database,
 	// or they are specified on the commandline when daemons are called.
 	monStore := GetMonStore(context, namespace)
 
 	if err := monStore.SetAll(DefaultCentralizedConfigs(clusterInfo.CephVersion)...); err != nil {
-		return fmt.Errorf("failed to apply default Ceph configurations. %+v", err)
+		return errors.Wrapf(err, "failed to apply default Ceph configurations")
 	}
 
 	if err := monStore.SetAll(DefaultLegacyConfigs()...); err != nil {
-		return fmt.Errorf("failed to apply legacy config overrides. %+v", err)
+		return errors.Wrapf(err, "failed to apply legacy config overrides")
+	}
+
+	// Apply Multus if needed
+	if networkSpec.IsMultus() {
+		logger.Info("configuring ceph network(s) with multus")
+		cephNetworks, err := generateNetworkSettings(context, namespace, networkSpec.Selectors)
+		if err != nil {
+			errors.Wrap(err, "failed to generate network settings")
+		}
+
+		// Apply ceph network settings to the mon config store
+		if err := monStore.SetAll(cephNetworks...); err != nil {
+			return errors.Wrap(err, "failed to network config overrides")
+		}
 	}
 
 	return nil

@@ -24,19 +24,18 @@ import (
 	"syscall"
 
 	"github.com/coreos/pkg/capnslog"
-	opkit "github.com/rook/operator-kit"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/discover"
 	"github.com/rook/rook/pkg/operator/edgefs/cluster"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "edgefs-operator")
 
 type Operator struct {
 	context           *clusterd.Context
-	resources         []opkit.CustomResource
+	resources         []k8sutil.CustomResource
 	rookImage         string
 	securityAccount   string
 	clusterController *cluster.ClusterController
@@ -46,7 +45,7 @@ type Operator struct {
 func New(context *clusterd.Context, rookImage string, securityAccount string) *Operator {
 	clusterController := cluster.NewClusterController(context, rookImage)
 
-	schemes := []opkit.CustomResource{cluster.ClusterResource}
+	schemes := []k8sutil.CustomResource{cluster.ClusterResource}
 	return &Operator{
 		context:           context,
 		clusterController: clusterController,
@@ -65,7 +64,7 @@ func (o *Operator) Run() error {
 	}
 
 	rookDiscover := discover.New(o.context.Clientset)
-	if err := rookDiscover.Start(namespace, o.rookImage, o.securityAccount); err != nil {
+	if err := rookDiscover.Start(namespace, o.rookImage, o.securityAccount, false); err != nil {
 		return fmt.Errorf("Error starting device discovery daemonset: %v", err)
 	}
 

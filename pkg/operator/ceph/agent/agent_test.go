@@ -25,18 +25,21 @@ import (
 	"github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestStartAgentDaemonset(t *testing.T) {
-	clientset := test.New(3)
+	clientset := test.New(t, 3)
 
 	os.Setenv(k8sutil.PodNamespaceEnvVar, "rook-system")
 	defer os.Unsetenv(k8sutil.PodNamespaceEnvVar)
 
 	os.Setenv(k8sutil.PodNameEnvVar, "rook-operator")
 	defer os.Unsetenv(k8sutil.PodNameEnvVar)
+
+	os.Setenv(agentDaemonsetPriorityClassNameEnv, "my-priority-class")
+	defer os.Unsetenv(agentDaemonsetPriorityClassNameEnv)
 
 	pod := v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -66,6 +69,7 @@ func TestStartAgentDaemonset(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, namespace, agentDS.Namespace)
 	assert.Equal(t, "rook-ceph-agent", agentDS.Name)
+	assert.Equal(t, "my-priority-class", agentDS.Spec.Template.Spec.PriorityClassName)
 	assert.Equal(t, "mysa", agentDS.Spec.Template.Spec.ServiceAccountName)
 	assert.True(t, *agentDS.Spec.Template.Spec.Containers[0].SecurityContext.Privileged)
 	volumes := agentDS.Spec.Template.Spec.Volumes
@@ -80,7 +84,7 @@ func TestStartAgentDaemonset(t *testing.T) {
 }
 
 func TestGetContainerImage(t *testing.T) {
-	clientset := test.New(3)
+	clientset := test.New(t, 3)
 
 	os.Setenv(k8sutil.PodNamespaceEnvVar, "Default")
 	defer os.Unsetenv(k8sutil.PodNamespaceEnvVar)
@@ -139,7 +143,7 @@ func TestGetContainerImageMultipleContainers(t *testing.T) {
 }
 
 func TestStartAgentDaemonsetWithToleration(t *testing.T) {
-	clientset := test.New(3)
+	clientset := test.New(t, 3)
 
 	os.Setenv(k8sutil.PodNamespaceEnvVar, "rook-system")
 	defer os.Unsetenv(k8sutil.PodNamespaceEnvVar)

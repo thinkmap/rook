@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rook/rook/pkg/operator/ceph/config"
+	e "github.com/pkg/errors"
 	optest "github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
 )
@@ -33,10 +33,10 @@ const (
 func checkLabel(key, value string, labels map[string]string) error {
 	v, ok := labels[key]
 	if !ok {
-		return fmt.Errorf("label not present: expected={%s: %s}", key, value)
+		return e.Errorf("label not present: expected={%s: %s}", key, value)
 	}
 	if v != value {
-		return fmt.Errorf("label mismatch: expected={%s: %s} present={%s: %s}", key, value, key, v)
+		return e.Errorf("label mismatch: expected={%s: %s} present={%s: %s}", key, value, key, v)
 	}
 	return nil
 }
@@ -52,7 +52,7 @@ func combineErrors(errors ...error) error {
 	}
 	if failure {
 		errText = strings.TrimRight(errText, ": ") // Remove ": " from end
-		return fmt.Errorf("%s", errText)
+		return e.Errorf("%s", errText)
 	}
 	return nil
 }
@@ -77,7 +77,7 @@ func VerifyPodLabels(appName, namespace, daemonType, daemonID string, labels map
 // DaemonSets, etc.
 func AssertLabelsContainCephRequirements(
 	t *testing.T, labels map[string]string,
-	daemonType config.DaemonType, daemonID, appName, namespace string,
+	daemonType, daemonID, appName, namespace string,
 ) {
 	optest.AssertLabelsContainRookRequirements(t, labels, appName)
 

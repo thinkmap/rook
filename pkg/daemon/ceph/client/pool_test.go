@@ -16,11 +16,11 @@ limitations under the License.
 package client
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 
-	"github.com/rook/rook/pkg/daemon/ceph/model"
+	"github.com/pkg/errors"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 
@@ -28,26 +28,49 @@ import (
 )
 
 func TestCreateECPoolWithOverwrites(t *testing.T) {
-	p := CephStoragePoolDetails{Name: "mypool", Size: 12345, ErasureCodeProfile: "myecprofile", FailureDomain: "host"}
+	testCreateECPool(t, true, "")
+}
+
+func TestCreateECPoolWithoutOverwrites(t *testing.T) {
+	testCreateECPool(t, false, "")
+}
+
+func TestCreateECPoolWithCompression(t *testing.T) {
+	testCreateECPool(t, false, "aggressive")
+	testCreateECPool(t, true, "none")
+}
+
+func testCreateECPool(t *testing.T, overwrite bool, compressionMode string) {
+	poolName := "mypool"
+	compressionModeCreated := false
+	p := cephv1.PoolSpec{
+		FailureDomain: "host",
+		ErasureCoded:  cephv1.ErasureCodedSpec{},
+	}
+	if compressionMode != "" {
+		p.CompressionMode = compressionMode
+	}
 	executor := &exectest.MockExecutor{}
 	context := &clusterd.Context{Executor: executor}
-	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		if args[1] == "pool" {
 			if args[2] == "create" {
 				assert.Equal(t, "mypool", args[3])
 				assert.Equal(t, "erasure", args[5])
-				assert.Equal(t, p.ErasureCodeProfile, args[6])
+				assert.Equal(t, "mypoolprofile", args[6])
 				return "", nil
 			}
 			if args[2] == "set" {
+				assert.Equal(t, "mypool", args[3])
 				if args[4] == "allow_ec_overwrites" {
-					assert.Equal(t, "mypool", args[3])
+					assert.Equal(t, true, overwrite)
 					assert.Equal(t, "true", args[5])
 					return "", nil
-				} else if args[4] == "min_size" {
-					assert.Equal(t, "mypool", args[3])
-					assert.Equal(t, "1", args[5])
+				}
+				if args[4] == "compression_mode" {
+					assert.Equal(t, compressionMode, args[5])
+					compressionModeCreated = true
 					return "", nil
 				}
 			}
@@ -58,62 +81,40 @@ func TestCreateECPoolWithOverwrites(t *testing.T) {
 				return "", nil
 			}
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
-	err := CreateECPoolForApp(context, "myns", p, "myapp", true, model.ErasureCodedPoolConfig{DataChunkCount: 1})
+	err := CreateECPoolForApp(context, "myns", poolName, "mypoolprofile", p, DefaultPGCount, "myapp", overwrite)
 	assert.Nil(t, err)
-}
-
-func TestCreateECPoolWithoutOverwrites(t *testing.T) {
-	p := CephStoragePoolDetails{Name: "mypool", Size: 12345, ErasureCodeProfile: "myecprofile", FailureDomain: "host"}
-	executor := &exectest.MockExecutor{}
-	context := &clusterd.Context{Executor: executor}
-	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
-		logger.Infof("Command: %s %v", command, args)
-		if args[1] == "pool" {
-			if args[2] == "create" {
-				assert.Equal(t, "mypool", args[3])
-				assert.Equal(t, "erasure", args[5])
-				assert.Equal(t, p.ErasureCodeProfile, args[6])
-				return "", nil
-			}
-			if args[2] == "set" {
-				assert.Equal(t, "mypool", args[3])
-				assert.Equal(t, "min_size", args[4])
-				assert.Equal(t, "1", args[5])
-				return "", nil
-			}
-			if args[2] == "application" {
-				assert.Equal(t, "enable", args[3])
-				assert.Equal(t, "mypool", args[4])
-				assert.Equal(t, "myapp", args[5])
-				return "", nil
-			}
-		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+	if compressionMode != "" {
+		assert.True(t, compressionModeCreated)
+	} else {
+		assert.False(t, compressionModeCreated)
 	}
-
-	err := CreateECPoolForApp(context, "myns", p, "myapp", false, model.ErasureCodedPoolConfig{DataChunkCount: 1})
-	assert.Nil(t, err)
 }
 
 func TestCreateReplicaPool(t *testing.T) {
-	testCreateReplicaPool(t, "", "", "")
+	testCreateReplicaPool(t, "", "", "", "")
 }
 func TestCreateReplicaPoolWithFailureDomain(t *testing.T) {
-	testCreateReplicaPool(t, "osd", "mycrushroot", "")
+	testCreateReplicaPool(t, "osd", "mycrushroot", "", "")
 }
 
 func TestCreateReplicaPoolWithDeviceClass(t *testing.T) {
-	testCreateReplicaPool(t, "osd", "mycrushroot", "hdd")
+	testCreateReplicaPool(t, "osd", "mycrushroot", "hdd", "")
 }
 
-func testCreateReplicaPool(t *testing.T, failureDomain, crushRoot, deviceClass string) {
+func TestCreateReplicaPoolWithCompression(t *testing.T) {
+	testCreateReplicaPool(t, "osd", "mycrushroot", "hdd", "passive")
+	testCreateReplicaPool(t, "osd", "mycrushroot", "hdd", "force")
+}
+
+func testCreateReplicaPool(t *testing.T, failureDomain, crushRoot, deviceClass, compressionMode string) {
 	crushRuleCreated := false
+	compressionModeCreated := false
 	executor := &exectest.MockExecutor{}
 	context := &clusterd.Context{Executor: executor}
-	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		if args[1] == "pool" {
 			if args[2] == "create" {
@@ -123,8 +124,13 @@ func testCreateReplicaPool(t *testing.T, failureDomain, crushRoot, deviceClass s
 			}
 			if args[2] == "set" {
 				assert.Equal(t, "mypool", args[3])
-				assert.Equal(t, "size", args[4])
-				assert.Equal(t, "12345", args[5])
+				if args[4] == "size" {
+					assert.Equal(t, "12345", args[5])
+				}
+				if args[4] == "compression_mode" {
+					assert.Equal(t, compressionMode, args[5])
+					compressionModeCreated = true
+				}
 				return "", nil
 			}
 			if args[2] == "application" {
@@ -156,13 +162,24 @@ func testCreateReplicaPool(t *testing.T, failureDomain, crushRoot, deviceClass s
 			}
 			return "", nil
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
-	p := CephStoragePoolDetails{Name: "mypool", Size: 12345, FailureDomain: failureDomain, CrushRoot: crushRoot, DeviceClass: deviceClass}
-	err := CreateReplicatedPoolForApp(context, "myns", p, "myapp")
+	p := cephv1.PoolSpec{
+		FailureDomain: failureDomain, CrushRoot: crushRoot, DeviceClass: deviceClass,
+		Replicated: cephv1.ReplicatedSpec{Size: 12345},
+	}
+	if compressionMode != "" {
+		p.CompressionMode = compressionMode
+	}
+	err := CreateReplicatedPoolForApp(context, "myns", "mypool", p, DefaultPGCount, "myapp")
 	assert.Nil(t, err)
 	assert.True(t, crushRuleCreated)
+	if compressionMode != "" {
+		assert.True(t, compressionModeCreated)
+	} else {
+		assert.False(t, compressionModeCreated)
+	}
 }
 
 func testIsStringInSlice(a string, list []string) bool {
@@ -184,7 +201,7 @@ func TestGetPoolStatistics(t *testing.T) {
 	p.Trash.SnapCount = 0
 	executor := &exectest.MockExecutor{}
 	context := &clusterd.Context{Executor: executor}
-	executor.MockExecuteCommandWithOutput = func(debug bool, actionName string, command string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		a := "{\"images\":{\"count\":1,\"provisioned_bytes\":1024,\"snap_count\":1},\"trash\":{\"count\":1,\"provisioned_bytes\":2048,\"snap_count\":0}}"
 		logger.Infof("Command: %s %v", command, args)
 
@@ -193,11 +210,11 @@ func TestGetPoolStatistics(t *testing.T) {
 				if args[2] == "replicapool" {
 					return a, nil
 				}
-				return "", fmt.Errorf("rbd:error opening pool '%s': (2) No such file or directory", args[3])
+				return "", errors.Errorf("rbd:error opening pool '%s': (2) No such file or directory", args[3])
 
 			}
 		}
-		return "", fmt.Errorf("unexpected rbd command '%v'", args)
+		return "", errors.Errorf("unexpected rbd command %q", args)
 	}
 
 	stats, err := GetPoolStatistics(context, "replicapool", "cluster")
@@ -207,4 +224,43 @@ func TestGetPoolStatistics(t *testing.T) {
 	stats, err = GetPoolStatistics(context, "rbd", "cluster")
 	assert.NotNil(t, err)
 	assert.Nil(t, stats)
+}
+
+func TestSetPoolReplicatedSizeProperty(t *testing.T) {
+	poolName := "mypool"
+	executor := &exectest.MockExecutor{}
+	context := &clusterd.Context{Executor: executor}
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+
+		if args[2] == "set" {
+			assert.Equal(t, poolName, args[3])
+			assert.Equal(t, "size", args[4])
+			assert.Equal(t, "3", args[5])
+			return "", nil
+		}
+
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+
+	err := SetPoolReplicatedSizeProperty(context, "myns", poolName, "3")
+	assert.NoError(t, err)
+
+	// TEST POOL SIZE 1 AND RequireSafeReplicaSize True
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
+		logger.Infof("Command: %s %v", command, args)
+
+		if args[2] == "set" {
+			assert.Equal(t, "mypool", args[3])
+			assert.Equal(t, "size", args[4])
+			assert.Equal(t, "1", args[5])
+			assert.Equal(t, "--yes-i-really-mean-it", args[6])
+			return "", nil
+		}
+
+		return "", errors.Errorf("unexpected ceph command %q", args)
+	}
+
+	err = SetPoolReplicatedSizeProperty(context, "myns", poolName, "1")
+	assert.NoError(t, err)
 }

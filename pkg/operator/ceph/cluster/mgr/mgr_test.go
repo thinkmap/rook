@@ -23,7 +23,7 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
@@ -43,17 +43,18 @@ func TestStartMGR(t *testing.T) {
 	updateDeploymentAndWait, deploymentsUpdated = testopk8s.UpdateDeploymentAndWaitStub()
 
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName string, command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
 			return "{\"key\":\"mysecurekey\"}", nil
 		},
 	}
 
+	clientset := testop.New(t, 3)
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
 	context := &clusterd.Context{
 		Executor:  executor,
 		ConfigDir: configDir,
-		Clientset: testop.New(3)}
+		Clientset: clientset}
 	clusterInfo := &cephconfig.ClusterInfo{FSID: "myfsid"}
 	c := New(
 		clusterInfo,
@@ -61,16 +62,16 @@ func TestStartMGR(t *testing.T) {
 		"ns",
 		"myversion",
 		cephv1.CephVersionSpec{},
-		rookalpha.Placement{},
-		rookalpha.Annotations{},
+		rookv1.Placement{},
+		rookv1.Annotations{"my": "annotation"},
 		cephv1.NetworkSpec{},
 		cephv1.DashboardSpec{Enabled: true, SSL: true},
 		cephv1.MonitoringSpec{Enabled: true, RulesNamespace: ""},
 		cephv1.MgrSpec{},
 		v1.ResourceRequirements{},
+		"my-priority-class",
 		metav1.OwnerReference{},
 		"/var/lib/rook/",
-		false,
 		false,
 	)
 	defer os.RemoveAll(c.dataDir)
@@ -108,8 +109,10 @@ func validateStart(t *testing.T, c *Cluster) {
 		}
 		logger.Infof("Looking for cephmgr replica %d", i)
 		daemonName := mgrNames[i]
-		_, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(fmt.Sprintf("rook-ceph-mgr-%s", daemonName), metav1.GetOptions{})
+		d, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(fmt.Sprintf("rook-ceph-mgr-%s", daemonName), metav1.GetOptions{})
 		assert.Nil(t, err)
+		assert.Equal(t, map[string]string{"my": "annotation"}, d.Spec.Template.Annotations)
+		assert.Equal(t, "my-priority-class", d.Spec.Template.Spec.PriorityClassName)
 	}
 
 	_, err := c.context.Clientset.CoreV1().Services(c.Namespace).Get("rook-ceph-mgr", metav1.GetOptions{})
@@ -136,7 +139,7 @@ func TestConfigureModules(t *testing.T) {
 	configSettings := map[string]string{}
 	lastModuleConfigured := ""
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName string, command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
 			logger.Infof("Command: %s %v", command, args)
 			if command == "ceph" && len(args) > 3 {
 				if args[0] == "mgr" && args[1] == "module" {
@@ -156,7 +159,8 @@ func TestConfigureModules(t *testing.T) {
 		},
 	}
 
-	context := &clusterd.Context{Executor: executor, Clientset: testop.New(3)}
+	clientset := testop.New(t, 3)
+	context := &clusterd.Context{Executor: executor, Clientset: clientset}
 	clusterInfo := &cephconfig.ClusterInfo{}
 	c := &Cluster{
 		clusterInfo: clusterInfo,
@@ -177,9 +181,6 @@ func TestConfigureModules(t *testing.T) {
 	c.mgrSpec.Modules = []cephv1.Module{
 		{Name: "pg_autoscaler", Enabled: true},
 	}
-	c.clusterInfo.CephVersion = cephver.CephVersion{Major: 13}
-	assert.Error(t, c.configureMgrModules())
-	assert.Equal(t, 0, len(configSettings))
 
 	// one module that has a min version that is met
 	c.mgrSpec.Modules = []cephv1.Module{

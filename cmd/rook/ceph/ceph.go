@@ -24,7 +24,6 @@ import (
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	osdconfig "github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
-	"github.com/rook/rook/pkg/util/flags"
 )
 
 // Cmd is the main command for operator and daemons.
@@ -41,7 +40,6 @@ var (
 
 type config struct {
 	devices            string
-	directories        string
 	metadataDevice     string
 	dataDir            string
 	forceFormat        bool
@@ -51,12 +49,12 @@ type config struct {
 	networkInfo        clusterd.NetworkInfo
 	monEndpoints       string
 	nodeName           string
-	topologyAware      bool
 	pvcBacked          bool
 }
 
 func init() {
-	Cmd.AddCommand(operatorCmd,
+	Cmd.AddCommand(cleanUpCmd,
+		operatorCmd,
 		agentCmd,
 		osdCmd,
 		configCmd)
@@ -85,16 +83,6 @@ func addCephFlags(command *cobra.Command) {
 	// TODO: remove these legacy flags in the future
 	command.Flags().StringVar(&cfg.networkInfo.PublicAddrIPv4, "public-ipv4", "", "public IPv4 address for this machine")
 	command.Flags().StringVar(&cfg.networkInfo.ClusterAddrIPv4, "private-ipv4", "", "private IPv4 address for this machine")
-	command.Flags().MarkDeprecated("public-ipv4", "Use --public-ip instead. Will be removed in a future version.")
-	command.Flags().MarkDeprecated("private-ipv4", "Use --private-ip instead. Will be removed in a future version.")
-}
-
-func verifyRenamedFlags(cmd *cobra.Command) error {
-	renamed := []flags.RenamedFlag{
-		{NewFlagName: "public-ip", OldFlagName: "public-ipv4"},
-		{NewFlagName: "private-ip", OldFlagName: "private-ipv4"},
-	}
-	return flags.VerifyRenamedFlags(cmd, renamed)
 }
 
 func (c *config) NetworkInfo() clusterd.NetworkInfo {

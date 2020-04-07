@@ -3,6 +3,7 @@ title: CockroachDB
 weight: 500
 indent: true
 ---
+{% include_relative branch.liquid %}
 
 # CockroachDB Quickstart
 
@@ -19,6 +20,7 @@ To make sure you have a Kubernetes cluster that is ready for `Rook`, you can [fo
 First deploy the Rook CockroachDB operator using the following commands:
 
 ```console
+git clone --single-branch --branch {{ branchName }} https://github.com/rook/rook.git
 cd cluster/examples/kubernetes/cockroachdb
 kubectl create -f operator.yaml
 ```
@@ -63,7 +65,8 @@ kubectl -n rook-cockroachdb-system exec -it $(kubectl -n rook-cockroachdb-system
 ```
 
 This will land you in a prompt where you can begin to run SQL commands directly on the database cluster.
-For example:
+
+**Example**:
 
 ```console
 root@cockroachdb-public.rook-cockroachdb:26257/> show databases;
@@ -108,7 +111,7 @@ kubectl -n rook-cockroachdb-system exec -it $(kubectl -n rook-cockroachdb-system
 
 To clean up all resources associated with this walk-through, you can run the commands below.
 
-**NOTE:** that this will destroy your database and delete all of its associated data.
+> **NOTE**: that this will destroy your database and delete all of its associated data.
 
 ```console
 kubectl delete -f loadgen-kv.yaml

@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/rook/rook/pkg/clusterd"
+	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	testexec "github.com/rook/rook/pkg/operator/test"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
@@ -30,15 +31,16 @@ import (
 )
 
 func TestOSDStatus(t *testing.T) {
+	clientset := testexec.New(t, 2)
 	cluster := "fake"
 
 	var execCount = 0
 	executor := &exectest.MockExecutor{
-		MockExecuteCommandWithOutputFile: func(debug bool, actionName string, command string, outFileArg string, args ...string) (string, error) {
+		MockExecuteCommandWithOutputFile: func(command string, outFileArg string, args ...string) (string, error) {
 			return "{\"key\":\"mysecurekey\", \"osdid\":3.0}", nil
 		},
 	}
-	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName string, command string, outFileArg string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutputFile = func(command string, outFileArg string, args ...string) (string, error) {
 		logger.Infof("ExecuteCommandWithOutputFile: %s %v", command, args)
 		execCount++
 		if args[1] == "dump" {
@@ -51,7 +53,7 @@ func TestOSDStatus(t *testing.T) {
 		return "", nil
 	}
 
-	executor.MockExecuteCommandWithOutput = func(debug bool, actionName string, command string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("ExecuteCommandWithOutput: %s %v", command, args)
 		return "", nil
 	}
@@ -59,7 +61,7 @@ func TestOSDStatus(t *testing.T) {
 	// Setting up objects needed to create OSD
 	context := &clusterd.Context{
 		Executor:  executor,
-		Clientset: testexec.New(2),
+		Clientset: clientset,
 	}
 
 	labels := map[string]string{
@@ -83,8 +85,12 @@ func TestOSDStatus(t *testing.T) {
 	dp, _ := context.Clientset.AppsV1().Deployments(cluster).List(metav1.ListOptions{LabelSelector: fmt.Sprintf("%v=%d", OsdIdLabelKey, 0)})
 	assert.Equal(t, 1, len(dp.Items))
 
+	cephVersion := cephver.CephVersion{
+		Major: 14,
+	}
+
 	// Initializing an OSD monitoring
-	osdMon := NewMonitor(context, cluster, true)
+	osdMon := NewMonitor(context, cluster, true, cephVersion)
 
 	// Run OSD monitoring routine
 	err := osdMon.osdStatus()
@@ -98,8 +104,12 @@ func TestOSDStatus(t *testing.T) {
 }
 
 func TestMonitorStart(t *testing.T) {
+	cephVersion := cephver.CephVersion{
+		Major: 14,
+	}
+
 	stopCh := make(chan struct{})
-	osdMon := NewMonitor(&clusterd.Context{}, "cluster", true)
+	osdMon := NewMonitor(&clusterd.Context{}, "cluster", true, cephVersion)
 	logger.Infof("starting osd monitor")
 	go osdMon.Start(stopCh)
 	close(stopCh)

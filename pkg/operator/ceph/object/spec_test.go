@@ -44,8 +44,9 @@ func TestPodSpecs(t *testing.T) {
 			v1.ResourceMemory: *resource.NewQuantity(500.0, resource.BinarySI),
 		},
 	}
+	store.Spec.Gateway.PriorityClassName = "my-priority-class"
 	info := testop.CreateConfigDir(1)
-	info.CephVersion = cephver.Mimic
+	info.CephVersion = cephver.Nautilus
 	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "default", "rook-ceph", "/var/lib/rook/")
 
 	c := &clusterConfig{
@@ -68,9 +69,18 @@ func TestPodSpecs(t *testing.T) {
 
 	s := c.makeRGWPodSpec(rgwConfig)
 
+	// Check pod anti affinity is well added to be compliant with HostNetwork setting
+	assert.Equal(t,
+		1,
+		len(s.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution))
+	assert.Equal(t,
+		getLabels(c.store.Name, c.store.Namespace),
+		s.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].LabelSelector.MatchLabels)
+
 	podTemplate := cephtest.NewPodTemplateSpecTester(t, &s)
 	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
-		"200", "100", "1337", "500" /* resources */)
+		"200", "100", "1337", "500", /* resources */
+		"my-priority-class")
 }
 
 func TestSSLPodSpec(t *testing.T) {
@@ -85,8 +95,9 @@ func TestSSLPodSpec(t *testing.T) {
 			v1.ResourceMemory: *resource.NewQuantity(500.0, resource.BinarySI),
 		},
 	}
+	store.Spec.Gateway.PriorityClassName = "my-priority-class"
 	info := testop.CreateConfigDir(1)
-	info.CephVersion = cephver.Mimic
+	info.CephVersion = cephver.Nautilus
 	data := cephconfig.NewStatelessDaemonDataPathMap(cephconfig.RgwType, "default", "rook-ceph", "/var/lib/rook/")
 	store.Spec.Gateway.SSLCertificateRef = "mycert"
 	store.Spec.Gateway.SecurePort = 443
@@ -112,7 +123,8 @@ func TestSSLPodSpec(t *testing.T) {
 
 	podTemplate := cephtest.NewPodTemplateSpecTester(t, &s)
 	podTemplate.RunFullSuite(cephconfig.RgwType, "default", "rook-ceph-rgw", "mycluster", "ceph/ceph:myversion",
-		"200", "100", "1337", "500" /* resources */)
+		"200", "100", "1337", "500", /* resources */
+		"my-priority-class")
 
 	assert.True(t, s.Spec.HostNetwork)
 	assert.Equal(t, v1.DNSClusterFirstWithHostNet, s.Spec.DNSPolicy)
@@ -143,11 +155,59 @@ func TestValidateSpec(t *testing.T) {
 	err = validateStore(context, s)
 	assert.Nil(t, err)
 
-	// no replication or EC
+	// no replication or EC is valid
 	s.Spec.MetadataPool.Replicated.Size = 0
 	err = validateStore(context, s)
-	assert.NotNil(t, err)
+	assert.Nil(t, err)
 	s.Spec.MetadataPool.Replicated.Size = 1
 	err = validateStore(context, s)
 	assert.Nil(t, err)
+}
+
+func TestGenerateLiveProbe(t *testing.T) {
+	store := simpleStore()
+	c := &clusterConfig{
+		store: store,
+		clusterSpec: &cephv1.ClusterSpec{
+			Network: cephv1.NetworkSpec{
+				HostNetwork: false,
+			},
+		},
+	}
+
+	// No SSL - HostNetwork is disabled - using internal port
+	p := c.generateLiveProbe()
+	assert.Equal(t, int32(8080), p.Handler.HTTPGet.Port.IntVal)
+	assert.Equal(t, v1.URISchemeHTTP, p.Handler.HTTPGet.Scheme)
+
+	// SSL - HostNetwork is disabled - using internal port
+	c.store.Spec.Gateway.Port = 0
+	c.store.Spec.Gateway.SecurePort = 321
+	c.store.Spec.Gateway.SSLCertificateRef = "foo"
+	p = c.generateLiveProbe()
+	assert.Equal(t, int32(8080), p.Handler.HTTPGet.Port.IntVal)
+	assert.Equal(t, v1.URISchemeHTTPS, p.Handler.HTTPGet.Scheme)
+
+	// No SSL - HostNetwork is enabled
+	c.store.Spec.Gateway.Port = 123
+	c.store.Spec.Gateway.SecurePort = 0
+	c.clusterSpec.Network.HostNetwork = true
+	p = c.generateLiveProbe()
+	assert.Equal(t, int32(123), p.Handler.HTTPGet.Port.IntVal)
+
+	// SSL - HostNetwork is enabled
+	c.store.Spec.Gateway.Port = 0
+	c.store.Spec.Gateway.SecurePort = 321
+	c.store.Spec.Gateway.SSLCertificateRef = "foo"
+	p = c.generateLiveProbe()
+	assert.Equal(t, int32(321), p.Handler.HTTPGet.Port.IntVal)
+
+	// Both Non-SSL and SSL are enabled
+	// liveprobe just on Non-SSL
+	c.store.Spec.Gateway.Port = 123
+	c.store.Spec.Gateway.SecurePort = 321
+	c.store.Spec.Gateway.SSLCertificateRef = "foo"
+	p = c.generateLiveProbe()
+	assert.Equal(t, v1.URISchemeHTTP, p.Handler.HTTPGet.Scheme)
+	assert.Equal(t, int32(123), p.Handler.HTTPGet.Port.IntVal)
 }

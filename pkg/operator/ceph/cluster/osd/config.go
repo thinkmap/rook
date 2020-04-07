@@ -18,10 +18,10 @@ package osd
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
 	apps "k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -31,24 +31,25 @@ key = %s
 `
 )
 
-func (c *Cluster) generateKeyring(osdID string, d *apps.Deployment) error {
-	resourceName := d.GetName()
+func (c *Cluster) generateKeyring(osdID int) (string, error) {
+	deploymentName := fmt.Sprintf(osdAppNameFmt, osdID)
+	osdIDStr := strconv.Itoa(osdID)
 
-	user := fmt.Sprintf("osd.%s", osdID)
+	user := fmt.Sprintf("osd.%s", osdIDStr)
 	access := []string{"osd", "allow *", "mon", "allow profile osd"}
-	ownerRef := &metav1.OwnerReference{
-		UID:        d.UID,
-		APIVersion: "v1",
-		Kind:       "deployment",
-		Name:       resourceName,
-	}
-	s := keyring.GetSecretStore(c.context, c.Namespace, ownerRef)
+
+	s := keyring.GetSecretStore(c.context, c.Namespace, &c.ownerRef)
 
 	key, err := s.GenerateKey(user, access)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	keyring := fmt.Sprintf(keyringTemplate, osdID, key)
-	return s.CreateOrUpdate(resourceName, keyring)
+	keyring := fmt.Sprintf(keyringTemplate, osdIDStr, key)
+	return keyring, s.CreateOrUpdate(deploymentName, keyring)
+}
+
+func (c *Cluster) associateKeyring(existingKeyring string, d *apps.Deployment) error {
+	s := keyring.GetSecretStoreForDeployment(c.context, d)
+	return s.CreateOrUpdate(d.GetName(), existingKeyring)
 }

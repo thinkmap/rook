@@ -18,13 +18,13 @@ package clusterdisruption
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	cephClient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd"
@@ -40,7 +40,7 @@ func (r *ReconcileClusterDisruption) getOsdDataList(request reconcile.Request, p
 	namespaceListOpts := client.InNamespace(request.Namespace)
 	err := r.client.List(context.TODO(), osdDeploymentList, client.MatchingLabels{k8sutil.AppAttr: osd.AppName}, namespaceListOpts)
 	if err != nil {
-		return nil, fmt.Errorf("could not list osd deployments: %+v", err)
+		return nil, errors.Wrapf(err, "could not list osd deployments")
 	}
 
 	osds := make([]OsdData, 0)
@@ -50,22 +50,31 @@ func (r *ReconcileClusterDisruption) getOsdDataList(request reconcile.Request, p
 		labels := deployment.Spec.Template.ObjectMeta.GetLabels()
 		osdID, ok := labels[osd.OsdIdLabelKey]
 		if !ok {
-			return nil, fmt.Errorf("osd %s was not labeled with ", deployment.ObjectMeta.Name)
+			return nil, errors.Errorf("osd %q was not labeled with %q", deployment.GetName(), osd.OsdIdLabelKey)
 		}
 		osdIDInt, err := strconv.Atoi(osdID)
 		if err != nil {
-			return nil, fmt.Errorf("osd id not an int: %s", osdID)
+			return nil, errors.Wrapf(err, "failed to convert osd id %q in an int", osdID)
 		}
 		crushMeta, err := r.osdCrushLocationMap.Get(request.Namespace, osdIDInt)
 		if err != nil {
-			return nil, fmt.Errorf("could not fetch info from ceph for osd %s", osdID)
+			// If the error contains that message, this means the cluster is not up and running
+			// No monitors are present and thus no ceph configuration has been created
+			//
+			// Or this means the ceph config hasn't been written on the operator yet
+			// The controller starts before we run WriteConnectionConfig()
+			if strings.Contains(err.Error(), "error calling conf_read_file") {
+				logger.Debugf("Ceph %q cluster is not ready, cannot check osd location yet.", request.Namespace)
+				return nil, nil
+			}
+			return nil, errors.Wrapf(err, "could not fetch info from ceph for osd %q", osdID)
 		}
 		// bypass the cache if the topology location is not populated in the cache
 		_, failureDomainKnown := crushMeta.Location[poolFailureDomain]
 		if !failureDomainKnown {
 			crushMeta, err = r.osdCrushLocationMap.get(request.Namespace, osdIDInt)
 			if err != nil {
-				return nil, fmt.Errorf("could not fetch info from ceph for osd %s", osdID)
+				return nil, errors.Wrapf(err, "could not fetch info from ceph for osd %q", osdID)
 			}
 		}
 
@@ -120,7 +129,7 @@ func (o *OSDCrushLocationMap) Get(clusterNamespace string, id int) (*cephClient.
 	if !ok {
 		osdResult, err := o.get(clusterNamespace, id)
 		if err != nil {
-			return nil, fmt.Errorf("failed to run `find` on osd %d in cluster %s: %v", id, clusterNamespace, err)
+			return nil, errors.Wrapf(err, "failed to run `find` on osd %d in cluster %q", id, clusterNamespace)
 		}
 		o.clusterLocationMap[clusterNamespace][id] = cachedOSDLocation{result: osdResult, lastSynced: time.Now()}
 		return osdResult, nil
@@ -130,7 +139,7 @@ func (o *OSDCrushLocationMap) Get(clusterNamespace string, id int) (*cephClient.
 	if time.Since(osdLocation.lastSynced) > o.ResyncPeriod {
 		osdResult, err := o.get(clusterNamespace, id)
 		if err != nil {
-			return nil, fmt.Errorf("failed to run `find` on osd %d in cluster %s: %v", id, clusterNamespace, err)
+			return nil, errors.Wrapf(err, "failed to run `find` on osd %d in cluster %q", id, clusterNamespace)
 		}
 		o.clusterLocationMap[clusterNamespace][id] = cachedOSDLocation{result: osdResult, lastSynced: time.Now()}
 		return osdResult, nil
@@ -144,7 +153,7 @@ func (o *OSDCrushLocationMap) Get(clusterNamespace string, id int) (*cephClient.
 func (o *OSDCrushLocationMap) get(clusterNamespace string, id int) (*cephClient.CrushFindResult, error) {
 	osdResult, err := cephClient.FindOSDInCrushMap(o.Context, clusterNamespace, id)
 	if err != nil {
-		return nil, fmt.Errorf("failed running find on osd %d: %+v", id, err)
+		return nil, errors.Wrapf(err, "failed running find on osd %d", id)
 	}
 	o.clusterLocationMap[clusterNamespace][id] = cachedOSDLocation{
 		result:     osdResult,
@@ -160,29 +169,25 @@ func getOSDsForNodes(osdDataList []OsdData, nodeList []*corev1.Node, failureDoma
 			logger.Warningf("node in nodelist was nil")
 			continue
 		}
-		topologyLabelMap := map[string]string{
-			"host":   corev1.LabelHostname,
-			"zone":   corev1.LabelZoneFailureDomain,
-			"region": corev1.LabelZoneRegion,
-		}
-		failureDomainLabel, ok := topologyLabelMap[failureDomainType]
-		if !ok {
-			return nil, fmt.Errorf("invalid failure domain %s cannot manage PDBs for OSDs", failureDomainType)
-		}
-		nodeLabels := node.ObjectMeta.GetLabels()
+		nodeTopologyMap := osd.ExtractOSDTopologyFromLabels(node.GetLabels())
+
 		for _, osdData := range osdDataList {
-			secondaryCrushHostname := osdData.CrushMeta.Host
+			// get the crush location of the osd
 			crushFailureDomain, ok := osdData.CrushMeta.Location[failureDomainType]
-			if !ok && secondaryCrushHostname == "" {
-				return nil, fmt.Errorf("could not find the CrushFindResult.Location['%s'] for %s", failureDomainType, osdData.Deployment.ObjectMeta.Name)
-			}
-			nodeFailureDomain, ok := nodeLabels[failureDomainLabel]
 			if !ok {
-				return nil, fmt.Errorf("could not find the %s label on node %s", failureDomainLabel, node.ObjectMeta.Name)
+				return nil, errors.Errorf("could not find the CrushFindResult.Location[%q] for %q", failureDomainType, osdData.Deployment.GetName())
 			}
-			if cephClient.IsNormalizedCrushNameEqual(nodeFailureDomain, crushFailureDomain) || cephClient.IsNormalizedCrushNameEqual(secondaryCrushHostname, crushFailureDomain) {
+			// get the crush location of the node
+			nodeFailureDomain, ok := nodeTopologyMap[failureDomainType]
+			if !ok {
+				return nil, errors.Errorf("could not find the %q failure domain on node %q", failureDomainType, node.GetName())
+			}
+
+			// check if the node and osd have the same crush location value for this particular crush location type
+			if cephClient.IsNormalizedCrushNameEqual(nodeFailureDomain, crushFailureDomain) || (failureDomainType == "host" && cephClient.IsNormalizedCrushNameEqual(node.GetName(), crushFailureDomain)) {
 				nodeOsdDataList = append(nodeOsdDataList, osdData)
 			}
+
 		}
 	}
 	return nodeOsdDataList, nil
@@ -195,7 +200,7 @@ func getFailureDomainMapForOsds(osdDataList []OsdData, failureDomainType string)
 	for _, osdData := range osdDataList {
 		failureDomainValue, ok := osdData.CrushMeta.Location[failureDomainType]
 		if !ok {
-			logger.Errorf("failureDomain type %s not associated with %s", failureDomainType, osdData.Deployment.ObjectMeta.Name)
+			logger.Errorf("failureDomain type %q not associated with %q", failureDomainType, osdData.Deployment.GetName())
 			unfoundOSDs = append(unfoundOSDs, osdData.Deployment.ObjectMeta.Name)
 		} else {
 			if len(failureDomainMap[failureDomainValue]) == 0 {
@@ -205,7 +210,7 @@ func getFailureDomainMapForOsds(osdDataList []OsdData, failureDomainType string)
 		}
 	}
 	if len(unfoundOSDs) > 0 {
-		err = fmt.Errorf("failure domain type %s not associated with osds: [%s]", failureDomainType, strings.Join(unfoundOSDs, ","))
+		err = errors.Errorf("failure domain type %q not associated with osds: [%q]", failureDomainType, strings.Join(unfoundOSDs, ","))
 	}
 	return failureDomainMap, err
 }

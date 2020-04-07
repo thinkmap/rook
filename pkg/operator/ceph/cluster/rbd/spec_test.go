@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config"
@@ -33,14 +33,15 @@ import (
 )
 
 func TestPodSpec(t *testing.T) {
+	clientset := optest.New(t, 1)
 	c := New(
 		&cephconfig.ClusterInfo{FSID: "myfsid"},
-		&clusterd.Context{Clientset: optest.New(1)},
+		&clusterd.Context{Clientset: clientset},
 		"ns",
 		"rook/rook:myversion",
 		cephv1.CephVersionSpec{Image: "ceph/ceph:myceph"},
-		rookalpha.Placement{},
-		rookalpha.Annotations{},
+		rookv1.Placement{},
+		rookv1.Annotations{},
 		cephv1.NetworkSpec{},
 		cephv1.RBDMirroringSpec{Workers: 2},
 		v1.ResourceRequirements{
@@ -53,9 +54,9 @@ func TestPodSpec(t *testing.T) {
 				v1.ResourceMemory: *resource.NewQuantity(300.0, resource.BinarySI),
 			},
 		},
+		"my-priority-class",
 		metav1.OwnerReference{},
 		"/var/lib/rook/",
-		false,
 		false,
 	)
 	daemonConf := daemonConfig{
@@ -69,9 +70,10 @@ func TestPodSpec(t *testing.T) {
 
 	// Deployment should have Ceph labels
 	cephtest.AssertLabelsContainCephRequirements(t, d.ObjectMeta.Labels,
-		config.RbdMirrorType, "a", appName, "ns")
+		config.RbdMirrorType, "a", AppName, "ns")
 
 	podTemplate := cephtest.NewPodTemplateSpecTester(t, &d.Spec.Template)
-	podTemplate.RunFullSuite(config.RbdMirrorType, "a", appName, "ns", "ceph/ceph:myceph",
-		"200", "100", "600", "300" /* resources */)
+	podTemplate.RunFullSuite(config.RbdMirrorType, "a", AppName, "ns", "ceph/ceph:myceph",
+		"200", "100", "600", "300", /* resources */
+		"my-priority-class")
 }

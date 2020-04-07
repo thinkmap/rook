@@ -21,6 +21,7 @@ import (
 
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
+	apps "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -55,28 +56,32 @@ func (c *Cluster) dashboardPort() int {
 	return c.dashboard.Port
 }
 
-func (c *Cluster) generateKeyring(m *mgrConfig) error {
+func (c *Cluster) generateKeyring(m *mgrConfig) (string, error) {
 	user := fmt.Sprintf("mgr.%s", m.DaemonID)
 	/* TODO: the access string here does not match the access from the keyring template. should they match? */
 	access := []string{"mon", "allow *", "mds", "allow *", "osd", "allow *"}
-	/* TODO: can we change this ownerref to be the deployment or service? */
 	s := keyring.GetSecretStore(c.context, c.Namespace, &c.ownerRef)
 
 	key, err := s.GenerateKey(user, access)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Delete legacy key store for upgrade from Rook v0.9.x to v1.0.x
 	err = c.context.Clientset.CoreV1().Secrets(c.Namespace).Delete(m.ResourceName, &metav1.DeleteOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.Debugf("legacy mgr key %s is already removed", m.ResourceName)
+			logger.Debugf("legacy mgr key %q is already removed", m.ResourceName)
 		} else {
-			logger.Warningf("legacy mgr key %s could not be removed: %+v", m.ResourceName, err)
+			logger.Warningf("legacy mgr key %q could not be removed. %v", m.ResourceName, err)
 		}
 	}
 
 	keyring := fmt.Sprintf(keyringTemplate, m.DaemonID, key)
-	return s.CreateOrUpdate(m.ResourceName, keyring)
+	return keyring, s.CreateOrUpdate(m.ResourceName, keyring)
+}
+
+func (c *Cluster) associateKeyring(existingKeyring string, d *apps.Deployment) error {
+	s := keyring.GetSecretStoreForDeployment(c.context, d)
+	return s.CreateOrUpdate(d.GetName(), existingKeyring)
 }

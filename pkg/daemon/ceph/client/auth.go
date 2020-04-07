@@ -17,34 +17,22 @@ package client
 
 import (
 	"encoding/json"
-	"fmt"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 )
-
-// AuthAdd will create a new user with the given capabilities and using the already generated keyring
-// found at the given keyring path.  This should not be used when the user may already exist.
-func AuthAdd(context *clusterd.Context, clusterName, name, keyringPath string, caps []string) error {
-	args := append([]string{"auth", "add", name, "-i", keyringPath}, caps...)
-	_, err := NewCephCommand(context, clusterName, args).Run()
-	if err != nil {
-		return fmt.Errorf("failed to auth add for %s: %+v", name, err)
-	}
-
-	return nil
-}
 
 // AuthGetOrCreate will either get or create a user with the given capabilities.  The keyring for the
 // user will be written to the given keyring path.
 func AuthGetOrCreate(context *clusterd.Context, clusterName, name, keyringPath string, caps []string) error {
+	logger.Infof("getting or creating ceph auth %q", name)
 	args := append([]string{"auth", "get-or-create", name, "-o", keyringPath}, caps...)
-
 	cmd := NewCephCommand(context, clusterName, args)
 	cmd.JsonOutput = false
 	cmd.OutputFile = false
 	_, err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("failed to auth get-or-create for %s: %+v", name, err)
+		return errors.Wrapf(err, "failed to auth get-or-create for %s", name)
 	}
 
 	return nil
@@ -52,10 +40,11 @@ func AuthGetOrCreate(context *clusterd.Context, clusterName, name, keyringPath s
 
 // AuthGetKey gets the key for the given user.
 func AuthGetKey(context *clusterd.Context, clusterName, name string) (string, error) {
+	logger.Infof("getting ceph auth key %q", name)
 	args := []string{"auth", "get-key", name}
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return "", fmt.Errorf("failed to get key for %s: %+v", name, err)
+		return "", errors.Wrapf(err, "failed to get key for %s", name)
 	}
 
 	return parseAuthKey(buf)
@@ -63,10 +52,11 @@ func AuthGetKey(context *clusterd.Context, clusterName, name string) (string, er
 
 // AuthGetOrCreateKey gets or creates the key for the given user.
 func AuthGetOrCreateKey(context *clusterd.Context, clusterName, name string, caps []string) (string, error) {
+	logger.Infof("getting or creating ceph auth key %q", name)
 	args := append([]string{"auth", "get-or-create-key", name}, caps...)
 	buf, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return "", fmt.Errorf("failed get-or-create-key %s: %+v", name, err)
+		return "", errors.Wrapf(err, "failed get-or-create-key %s", name)
 	}
 
 	return parseAuthKey(buf)
@@ -74,20 +64,54 @@ func AuthGetOrCreateKey(context *clusterd.Context, clusterName, name string, cap
 
 // AuthUpdateCaps updates the capabilities for the given user.
 func AuthUpdateCaps(context *clusterd.Context, clusterName, name string, caps []string) error {
+	logger.Infof("updating ceph auth caps %q to %v", name, caps)
 	args := append([]string{"auth", "caps", name}, caps...)
 	_, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return fmt.Errorf("failed to update caps for %s. %+v", name, err)
+		return errors.Wrapf(err, "failed to update caps for %s", name)
 	}
 	return err
 }
 
+// AuthGetCaps gets the capabilities for the given user.
+func AuthGetCaps(context *clusterd.Context, clusterName, name string) (caps map[string]string, error error) {
+	logger.Infof("getting ceph auth caps for %q", name)
+	args := append([]string{"auth", "get", name})
+	output, err := NewCephCommand(context, clusterName, args).Run()
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to get caps for %q", name)
+	}
+
+	var data []map[string]interface{}
+	err = json.Unmarshal(output, &data)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to unmarshal auth get response")
+	}
+	caps = make(map[string]string)
+
+	if data[0]["caps"].(map[string]interface{})["mon"] != nil {
+		caps["mon"] = data[0]["caps"].(map[string]interface{})["mon"].(string)
+	}
+	if data[0]["caps"].(map[string]interface{})["mds"] != nil {
+		caps["mds"] = data[0]["caps"].(map[string]interface{})["mds"].(string)
+	}
+	if data[0]["caps"].(map[string]interface{})["mgr"] != nil {
+		caps["mgr"] = data[0]["caps"].(map[string]interface{})["mgr"].(string)
+	}
+	if data[0]["caps"].(map[string]interface{})["osd"] != nil {
+		caps["osd"] = data[0]["caps"].(map[string]interface{})["osd"].(string)
+	}
+
+	return caps, err
+}
+
 // AuthDelete will delete the given user.
 func AuthDelete(context *clusterd.Context, clusterName, name string) error {
+	logger.Infof("deleting ceph auth %q", name)
 	args := []string{"auth", "del", name}
 	_, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
-		return fmt.Errorf("failed to delete auth for %s. %v", name, err)
+		return errors.Wrapf(err, "failed to delete auth for %s", name)
 	}
 	return nil
 }
@@ -95,7 +119,7 @@ func AuthDelete(context *clusterd.Context, clusterName, name string) error {
 func parseAuthKey(buf []byte) (string, error) {
 	var resp map[string]interface{}
 	if err := json.Unmarshal(buf, &resp); err != nil {
-		return "", fmt.Errorf("failed to unmarshal get/create key response: %+v", err)
+		return "", errors.Wrapf(err, "failed to unmarshal get/create key response")
 	}
 	return resp["key"].(string), nil
 }

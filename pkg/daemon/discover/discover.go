@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"regexp"
 	"strings"
 	"syscall"
@@ -35,15 +36,23 @@ import (
 	"github.com/rook/rook/pkg/util/sys"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	discoverDaemonUdev = "DISCOVER_DAEMON_UDEV_BLACKLIST"
+)
+
 var (
-	logger          = capnslog.NewPackageLogger("github.com/rook/rook", "rook-discover")
-	AppName         = "rook-discover"
-	NodeAttr        = "rook.io/node"
+	logger = capnslog.NewPackageLogger("github.com/rook/rook", "rook-discover")
+	// AppName is the name of the pod
+	AppName = "rook-discover"
+	// NodeAttr is the attribute of that node
+	NodeAttr = "rook.io/node"
+	// LocalDiskCMData is the data name of the config map storing devices
 	LocalDiskCMData = "devices"
+	// LocalDiskCMName is name of the config map storing devices
 	LocalDiskCMName = "local-device-%s"
 	nodeName        string
 	namespace       string
@@ -51,18 +60,32 @@ var (
 	cmName          string
 	cm              *v1.ConfigMap
 	udevEventPeriod = time.Duration(5) * time.Second
+	useCVInventory  bool
 )
 
-func Run(context *clusterd.Context, probeInterval time.Duration) error {
+// CephVolumeInventory is the Go struct representation of the json output
+type CephVolumeInventory struct {
+	Path            string          `json:"path"`
+	Available       bool            `json:"available"`
+	RejectedReasons json.RawMessage `json:"rejected_reasons"`
+	SysAPI          json.RawMessage `json:"sys_api"`
+	LVS             json.RawMessage `json:"lvs"`
+}
+
+// Run is the entry point of that package execution
+func Run(context *clusterd.Context, probeInterval time.Duration, useCV bool) error {
 	if context == nil {
 		return fmt.Errorf("nil context")
 	}
-	logger.Infof("device discovery interval is %s", probeInterval.String())
+	logger.Debugf("device discovery interval is %q", probeInterval.String())
+	logger.Debugf("use ceph-volume inventory is %t", useCV)
 	nodeName = os.Getenv(k8sutil.NodeNameEnvVar)
 	namespace = os.Getenv(k8sutil.PodNamespaceEnvVar)
 	cmName = k8sutil.TruncateNodeName(LocalDiskCMName, nodeName)
+	useCVInventory = useCV
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGTERM)
+
 	err := updateDeviceCM(context)
 	if err != nil {
 		logger.Infof("failed to update device configmap: %v", err)
@@ -71,18 +94,21 @@ func Run(context *clusterd.Context, probeInterval time.Duration) error {
 
 	udevEvents := make(chan string)
 	go udevBlockMonitor(udevEvents, udevEventPeriod)
-
 	for {
 		select {
 		case <-sigc:
 			logger.Infof("shutdown signal received, exiting...")
 			return nil
 		case <-time.After(probeInterval):
-			updateDeviceCM(context)
+			if err := updateDeviceCM(context); err != nil {
+				logger.Errorf("failed to update device configmap during probe interval. %v", err)
+			}
 		case _, ok := <-udevEvents:
 			if ok {
 				logger.Info("trigger probe from udev event")
-				updateDeviceCM(context)
+				if err := updateDeviceCM(context); err != nil {
+					logger.Errorf("failed to update device configmap triggered from udev event. %v", err)
+				}
 			} else {
 				logger.Warningf("disabling udev monitoring")
 				udevEvents = nil
@@ -163,13 +189,25 @@ func rawUdevBlockMonitor(c chan string, matches, exclusions []string) {
 // only one event is emitted per period in order to deal with flapping.
 func udevBlockMonitor(c chan string, period time.Duration) {
 	defer close(c)
+	var udevFilter []string
 
 	// return any add or remove events, but none that match device mapper
-	// events. string matching is case-insensitve
+	// events. string matching is case-insensitive
 	events := make(chan string)
+
+	// get discoverDaemonUdevBlacklist from the environment variable
+	// if user doesn't provide any regex; generate the default regex
+	// else use the regex provided by user
+	discoverUdev := os.Getenv(discoverDaemonUdev)
+	if discoverUdev == "" {
+		discoverUdev = "(?i)dm-[0-9]+,(?i)rbd[0-9]+,(?i)nbd[0-9]+"
+	}
+	udevFilter = strings.Split(discoverUdev, ",")
+	logger.Infof("using the regular expressions %q", udevFilter)
+
 	go rawUdevBlockMonitor(events,
 		[]string{"(?i)add", "(?i)remove"},
-		[]string{"(?i)dm-[0-9]+", "(?i)rbd[0-9]+", "(?i)nbd[0-9]+"})
+		udevFilter)
 
 	for {
 		event, ok := <-events
@@ -244,6 +282,10 @@ func checkDeviceListsEqual(oldDevs, newDevs []sys.LocalDisk) bool {
 		if oldDev.Partitions != nil && match.Partitions == nil {
 			return false
 		}
+		if string(oldDev.CephVolumeData) == "" && string(match.CephVolumeData) != "" {
+			// return ceph volume inventory data was not enabled before
+			return false
+		}
 	}
 
 	for _, newDev := range newDevs {
@@ -261,6 +303,7 @@ func checkDeviceListsEqual(oldDevs, newDevs []sys.LocalDisk) bool {
 	return true
 }
 
+// DeviceListsEqual checks whether 2 lists are equal or not
 func DeviceListsEqual(old, new string) (bool, error) {
 	var oldDevs []sys.LocalDisk
 	var newDevs []sys.LocalDisk
@@ -285,12 +328,13 @@ func updateDeviceCM(context *clusterd.Context) error {
 		logger.Infof("failed to probe devices: %v", err)
 		return err
 	}
-	deviceJson, err := json.Marshal(devices)
+	deviceJSON, err := json.Marshal(devices)
 	if err != nil {
 		logger.Infof("failed to marshal: %v", err)
 		return err
 	}
-	deviceStr := string(deviceJson)
+
+	deviceStr := string(deviceJSON)
 	if cm == nil {
 		cm, err = context.Clientset.CoreV1().ConfigMaps(namespace).Get(cmName, metav1.GetOptions{})
 	}
@@ -298,13 +342,14 @@ func updateDeviceCM(context *clusterd.Context) error {
 		lastDevice = cm.Data[LocalDiskCMData]
 		logger.Debugf("last devices %s", lastDevice)
 	} else {
-		if !errors.IsNotFound(err) {
+		if !kerrors.IsNotFound(err) {
 			logger.Infof("failed to get configmap: %v", err)
 			return err
 		}
 
 		data := make(map[string]string, 1)
 		data[LocalDiskCMData] = deviceStr
+
 		// the map doesn't exist yet, create it now
 		cm = &v1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -317,6 +362,15 @@ func updateDeviceCM(context *clusterd.Context) error {
 			},
 			Data: data,
 		}
+
+		// Get the discover daemon pod details to attach the owner reference to the config map
+		discoverPod, err := k8sutil.GetRunningPod(context.Clientset)
+		if err != nil {
+			logger.Warningf("failed to get discover pod to set ownerref. %+v", err)
+		} else {
+			k8sutil.SetOwnerRefsWithoutBlockOwner(&cm.ObjectMeta, discoverPod.OwnerReferences)
+		}
+
 		cm, err = context.Clientset.CoreV1().ConfigMaps(namespace).Create(cm)
 		if err != nil {
 			logger.Infof("failed to create configmap: %v", err)
@@ -344,10 +398,22 @@ func updateDeviceCM(context *clusterd.Context) error {
 func probeDevices(context *clusterd.Context) ([]sys.LocalDisk, error) {
 	devices := make([]sys.LocalDisk, 0)
 	localDevices, err := clusterd.DiscoverDevices(context.Executor)
-	logger.Infof("localdevices - %+v", localDevices)
+	logger.Infof("localdevices: %+v", localDevices)
 	if err != nil {
 		return devices, fmt.Errorf("failed initial hardware discovery. %+v", err)
 	}
+
+	// ceph-volume inventory command takes a little time to complete.
+	// Get this data only if it is needed and once by function execution
+	var cvInventory *map[string]string = nil
+	if useCVInventory {
+		logger.Infof("Getting ceph-volume inventory information")
+		cvInventory, err = getCephVolumeInventory(context)
+		if err != nil {
+			logger.Errorf("error getting ceph-volume inventory: %v", err)
+		}
+	}
+
 	for _, device := range localDevices {
 		if device == nil {
 			continue
@@ -372,9 +438,57 @@ func probeDevices(context *clusterd.Context) ([]sys.LocalDisk, error) {
 		device.Filesystem = fs
 		device.Empty = clusterd.GetDeviceEmpty(device)
 
+		// Add the information provided by ceph-volume inventory
+		if cvInventory != nil {
+			CVData, deviceExists := (*cvInventory)[path.Join("/dev/", device.Name)]
+			if deviceExists {
+				device.CephVolumeData = CVData
+			} else {
+				logger.Errorf("ceph-volume information for device %q not found", device.Name)
+			}
+		} else {
+			device.CephVolumeData = ""
+		}
+
 		devices = append(devices, *device)
 	}
 
 	logger.Infof("available devices: %+v", devices)
 	return devices, nil
+}
+
+// getCephVolumeInventory: Return a map of strings indexed by device with the
+// information about the device returned by the command <ceph-volume inventory>
+func getCephVolumeInventory(context *clusterd.Context) (*map[string]string, error) {
+	inventory, err := context.Executor.ExecuteCommandWithOutput("ceph-volume", "inventory", "--format", "json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute ceph-volume inventory. %+v", err)
+	}
+
+	// Return a map with the information of each device indexed by path
+	CVDevices := make(map[string]string)
+
+	// No data retrieved from ceph-volume
+	if inventory == "" {
+		return &CVDevices, nil
+	}
+
+	// Get a slice to store the json data
+	bInventory := []byte(inventory)
+	var CVInventory []CephVolumeInventory
+	err = json.Unmarshal(bInventory, &CVInventory)
+	if err != nil {
+		return &CVDevices, fmt.Errorf("error unmarshalling json data coming from ceph-volume inventory. %v", err)
+	}
+
+	for _, device := range CVInventory {
+		jsonData, err := json.Marshal(device)
+		if err != nil {
+			logger.Errorf("error marshaling json data for device: %v", device.Path)
+		} else {
+			CVDevices[device.Path] = string(jsonData)
+		}
+	}
+
+	return &CVDevices, nil
 }

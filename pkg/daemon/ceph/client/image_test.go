@@ -22,6 +22,7 @@ import (
 
 	"strings"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
@@ -37,12 +38,12 @@ func TestCreateImage(t *testing.T) {
 
 	// mock an error during the create image call.  rbd tool returns error information to the output stream,
 	// separate from the error object, so verify that information also makes it back to us (because it is useful).
-	executor.MockExecuteCommandWithOutput = func(debug bool, actionName string, command string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		switch {
 		case command == "rbd" && args[0] == "create":
-			return "mocked detailed ceph error output stream", fmt.Errorf("some mocked error")
+			return "mocked detailed ceph error output stream", errors.New("some mocked error")
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 	image, err := CreateImage(context, "foocluster", "image1", "pool1", "", uint64(sizeMB)) // 1MB
 	assert.NotNil(t, err)
@@ -52,7 +53,7 @@ func TestCreateImage(t *testing.T) {
 	// (except for 0, that's OK)
 	createCalled := false
 	expectedSizeArg := ""
-	executor.MockExecuteCommandWithOutput = func(debug bool, actionName string, command string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		switch {
 		case command == "rbd" && args[0] == "create":
 			createCalled = true
@@ -63,7 +64,7 @@ func TestCreateImage(t *testing.T) {
 			return `{"name":"image1","size":1048576,"objects":1,"order":20,"object_size":1048576,"block_name_prefix":"pool1_data.229226b8b4567",` +
 				`"format":2,"features":["layering"],"op_features":[],"flags":[],"create_timestamp":"Fri Oct  5 19:46:20 2018"}`, nil
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
 	// 0 byte --> 0 MB
@@ -145,15 +146,15 @@ func TestCreateImage(t *testing.T) {
 func TestExpandImage(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	context := &clusterd.Context{Executor: executor}
-	executor.MockExecuteCommandWithTimeout = func(debug bool, timeout time.Duration, actionName string, command string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithTimeout = func(timeout time.Duration, command string, args ...string) (string, error) {
 		switch {
 		case args[1] != "kube/some-image":
-			return "", fmt.Errorf("no image %s", args[1])
+			return "", errors.Errorf("no image %s", args[1])
 
 		case command == "rbd" && args[0] == "resize":
 			return "everything is okay", nil
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 	err := ExpandImage(context, "default", "error-name", "kube", "mon1,mon2,mon3", "/tmp/keyring", 1000000)
 	assert.Error(t, err)
@@ -170,7 +171,7 @@ func TestListImageLogLevelInfo(t *testing.T) {
 	var err error
 	listCalled := false
 	emptyListResult := false
-	executor.MockExecuteCommandWithOutput = func(debug bool, actionName string, command string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		switch {
 		case command == "rbd" && args[0] == "ls" && args[1] == "-l":
 			listCalled = true
@@ -181,7 +182,7 @@ func TestListImageLogLevelInfo(t *testing.T) {
 
 			}
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
 	images, err = ListImages(context, "foocluster", "pool1")
@@ -234,7 +235,7 @@ func TestListImageLogLevelDebug(t *testing.T) {
 
 	listCalled := false
 	emptyListResult := false
-	executor.MockExecuteCommandWithOutput = func(debug bool, actionName string, command string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		switch {
 		case command == "rbd" && args[0] == "ls" && args[1] == "-l":
 			listCalled = true
@@ -244,7 +245,7 @@ func TestListImageLogLevelDebug(t *testing.T) {
 				return fmt.Sprintf(`%s[{"image":"image1","size":1048576,"format":2},{"image":"image2","size":2048576,"format":2},{"image":"image3","size":3048576,"format":2}]`, libradosDebugOut), nil
 			}
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
 	images, err = ListImages(context, "foocluster", "pool1")

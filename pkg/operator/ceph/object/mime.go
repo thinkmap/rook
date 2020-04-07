@@ -20,10 +20,10 @@ import (
 	"fmt"
 	"path"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 const (
@@ -36,7 +36,7 @@ const (
 )
 
 func (c *clusterConfig) mimeTypesConfigMapName() string {
-	return fmt.Sprintf("%s-mime-types", c.instanceName())
+	return fmt.Sprintf("%s-mime-types", instanceName(c.store.Name))
 }
 
 func mimeTypesMountPath() string {
@@ -44,15 +44,15 @@ func mimeTypesMountPath() string {
 }
 
 // store mime.types file in a config map
-func (c *clusterConfig) generateMimeTypes(ownerRef *metav1.OwnerReference) error {
-	k := k8sutil.NewConfigMapKVStore(c.store.Namespace, c.context.Clientset, *ownerRef)
-	if _, err := k.GetValue(c.mimeTypesConfigMapName(), mimeTypesFileName); err == nil || !errors.IsNotFound(err) {
+func (c *clusterConfig) generateMimeTypes() error {
+	k := k8sutil.NewConfigMapKVStore(c.store.Namespace, c.context.Clientset, *c.ownerRef)
+	if _, err := k.GetValue(c.mimeTypesConfigMapName(), mimeTypesFileName); err == nil || !kerrors.IsNotFound(err) {
 		logger.Infof("config map for object pool %s already exists, not overwriting", c.store.Name)
 		return nil
 	}
 	// is not found
 	if err := k.SetValue(c.mimeTypesConfigMapName(), mimeTypesFileName, mimeTypes); err != nil {
-		return fmt.Errorf("failed to create config map for object pool %s. %+v", c.store.Name, err)
+		return errors.Wrapf(err, "failed to create config map for object pool %s", c.store.Name)
 	}
 	return nil
 }

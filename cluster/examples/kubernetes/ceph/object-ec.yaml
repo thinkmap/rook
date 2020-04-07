@@ -21,9 +21,11 @@ spec:
     erasureCoded:
       dataChunks: 2
       codingChunks: 1
+    # Inline compression mode for the data pool
+    compressionMode: none
   # Whether to preserve metadata and data pools on object store deletion
   preservePoolsOnDelete: true
-  # The gaeteway service configuration
+  # The gateway service configuration
   gateway:
     # type of the gateway (s3)
     type: s3
@@ -61,3 +63,4 @@ spec:
     #  requests:
     #    cpu: "500m"
     #    memory: "1024Mi"
+    # priorityClassName: my-priority-class

@@ -17,9 +17,9 @@ limitations under the License.
 package client
 
 import (
-	"fmt"
 	"testing"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
@@ -61,7 +61,7 @@ var (
 func TestHostTree(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	emptyTreeResult := false
-	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		switch {
 		case args[0] == "osd" && args[1] == "tree":
@@ -70,7 +70,7 @@ func TestHostTree(t *testing.T) {
 			}
 			return fakeOsdTree, nil
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
 	tree, err := HostTree(&clusterd.Context{Executor: executor}, "rook")
@@ -89,7 +89,7 @@ func TestHostTree(t *testing.T) {
 func TestOsdListNum(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	emptyOsdListNumResult := false
-	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		switch {
 		case args[0] == "osd" && args[1] == "ls":
@@ -98,7 +98,7 @@ func TestOsdListNum(t *testing.T) {
 			}
 			return fakeOSdList, nil
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
 	list, err := OsdListNum(&clusterd.Context{Executor: executor}, "rook")

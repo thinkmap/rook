@@ -19,8 +19,9 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/pkg/errors"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
-	"github.com/rook/rook/pkg/daemon/ceph/model"
 )
 
 type CephErasureCodeProfile struct {
@@ -32,104 +33,81 @@ type CephErasureCodeProfile struct {
 	CrushRoot        string `json:"crush-root"`
 }
 
-func ListErasureCodeProfiles(context *clusterd.Context, clusterName string) ([]string, error) {
+func ListErasureCodeProfiles(context *clusterd.Context, namespace string) ([]string, error) {
 	args := []string{"osd", "erasure-code-profile", "ls"}
-	buf, err := NewCephCommand(context, clusterName, args).Run()
+	buf, err := NewCephCommand(context, namespace, args).Run()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list erasure-code-profiles: %+v", err)
+		return nil, errors.Wrapf(err, "failed to list erasure-code-profiles")
 	}
 
 	var ecProfiles []string
 	err = json.Unmarshal(buf, &ecProfiles)
 	if err != nil {
-		return nil, fmt.Errorf("unmarshal failed: %+v. raw buffer response: %s", err, string(buf))
+		return nil, errors.Wrapf(err, "unmarshal failed raw buffer response %s", string(buf))
 	}
 
 	return ecProfiles, nil
 }
 
-func GetErasureCodeProfileDetails(context *clusterd.Context, clusterName, name string) (CephErasureCodeProfile, error) {
+func GetErasureCodeProfileDetails(context *clusterd.Context, namespace, name string) (CephErasureCodeProfile, error) {
 	args := []string{"osd", "erasure-code-profile", "get", name}
-	buf, err := NewCephCommand(context, clusterName, args).Run()
+	buf, err := NewCephCommand(context, namespace, args).Run()
 	if err != nil {
-		return CephErasureCodeProfile{}, fmt.Errorf("failed to get erasure-code-profile for '%s': %+v", name, err)
+		return CephErasureCodeProfile{}, errors.Wrapf(err, "failed to get erasure-code-profile for %q", name)
 	}
 
 	var ecProfileDetails CephErasureCodeProfile
 	err = json.Unmarshal(buf, &ecProfileDetails)
 	if err != nil {
-		return CephErasureCodeProfile{}, fmt.Errorf("unmarshal failed: %+v. raw buffer response: %s", err, string(buf))
+		return CephErasureCodeProfile{}, errors.Wrapf(err, "unmarshal failed raw buffer response %s", string(buf))
 	}
 
 	return ecProfileDetails, nil
 }
 
-func CreateErasureCodeProfile(context *clusterd.Context, clusterName string, config model.ErasureCodedPoolConfig, name, failureDomain, crushRoot, deviceClass string) error {
+func CreateErasureCodeProfile(context *clusterd.Context, namespace, profileName string, pool cephv1.PoolSpec) error {
 	// look up the default profile so we can use the default plugin/technique
-	defaultProfile, err := GetErasureCodeProfileDetails(context, clusterName, "default")
+	defaultProfile, err := GetErasureCodeProfileDetails(context, namespace, "default")
 	if err != nil {
-		return fmt.Errorf("failed to look up default erasure code profile: %+v", err)
+		return errors.Wrapf(err, "failed to look up default erasure code profile")
 	}
 
 	// define the profile with a set of key/value pairs
 	profilePairs := []string{
-		fmt.Sprintf("k=%d", config.DataChunkCount),
-		fmt.Sprintf("m=%d", config.CodingChunkCount),
+		fmt.Sprintf("k=%d", pool.ErasureCoded.DataChunks),
+		fmt.Sprintf("m=%d", pool.ErasureCoded.CodingChunks),
 		fmt.Sprintf("plugin=%s", defaultProfile.Plugin),
 		fmt.Sprintf("technique=%s", defaultProfile.Technique),
 	}
-	if failureDomain != "" {
-		profilePairs = append(profilePairs, fmt.Sprintf("crush-failure-domain=%s", failureDomain))
+	if pool.FailureDomain != "" {
+		profilePairs = append(profilePairs, fmt.Sprintf("crush-failure-domain=%s", pool.FailureDomain))
 	}
-	if crushRoot != "" {
-		profilePairs = append(profilePairs, fmt.Sprintf("crush-root=%s", crushRoot))
+	if pool.CrushRoot != "" {
+		profilePairs = append(profilePairs, fmt.Sprintf("crush-root=%s", pool.CrushRoot))
 	}
-	if deviceClass != "" {
-		profilePairs = append(profilePairs, fmt.Sprintf("crush-device-class=%s", deviceClass))
+	if pool.DeviceClass != "" {
+		profilePairs = append(profilePairs, fmt.Sprintf("crush-device-class=%s", pool.DeviceClass))
 	}
 
-	args := []string{"osd", "erasure-code-profile", "set", name}
+	args := []string{"osd", "erasure-code-profile", "set", profileName}
 	args = append(args, profilePairs...)
-	_, err = NewCephCommand(context, clusterName, args).Run()
+	_, err = NewCephCommand(context, namespace, args).Run()
 	if err != nil {
-		return fmt.Errorf("failed to set ec-profile. %+v", err)
+		return errors.Wrapf(err, "failed to set ec-profile")
 	}
 
 	return nil
 }
 
-func DeleteErasureCodeProfile(context *clusterd.Context, clusterName string, erasureCodeProfile string) error {
-	args := []string{"osd", "erasure-code-profile", "rm", erasureCodeProfile}
+func DeleteErasureCodeProfile(context *clusterd.Context, namespace, profileName string) error {
+	args := []string{"osd", "erasure-code-profile", "rm", profileName}
 
-	cmd := NewCephCommand(context, clusterName, args)
+	cmd := NewCephCommand(context, namespace, args)
 	cmd.JsonOutput = false
 	buf, err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("failed to delete erasure-code-profile %s. Output: %s. Error: %+v", erasureCodeProfile, string(buf), err)
+		return errors.Wrapf(err, "failed to delete erasure-code-profile %q. output: %q.", profileName, string(buf))
 	}
 
 	return nil
-}
-
-func ModelPoolToCephPool(modelPool model.Pool) CephStoragePoolDetails {
-	pool := CephStoragePoolDetails{
-		Name:             modelPool.Name,
-		Number:           modelPool.Number,
-		FailureDomain:    modelPool.FailureDomain,
-		CrushRoot:        modelPool.CrushRoot,
-		DeviceClass:      modelPool.DeviceClass,
-		NotEnableAppPool: modelPool.NotEnableAppPool,
-	}
-
-	if modelPool.Type == model.Replicated {
-		pool.Size = modelPool.ReplicatedConfig.Size
-	} else if modelPool.Type == model.ErasureCoded {
-		pool.ErasureCodeProfile = GetErasureCodeProfileForPool(modelPool.Name)
-	}
-
-	return pool
-}
-
-func GetErasureCodeProfileForPool(poolName string) string {
-	return fmt.Sprintf("%s_ecprofile", poolName)
 }

@@ -18,12 +18,12 @@ package mds
 
 import (
 	"fmt"
-	"strconv"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	opspec "github.com/rook/rook/pkg/operator/ceph/spec"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -51,14 +51,15 @@ func (c *Cluster) makeDeployment(mdsConfig *mdsConfig) *apps.Deployment {
 			Containers: []v1.Container{
 				c.makeMdsDaemonContainer(mdsConfig),
 			},
-			RestartPolicy: v1.RestartPolicyAlways,
-			Volumes:       opspec.DaemonVolumes(mdsConfig.DataPathMap, mdsConfig.ResourceName),
-			HostNetwork:   c.clusterSpec.Network.IsHost(),
+			RestartPolicy:     v1.RestartPolicyAlways,
+			Volumes:           controller.DaemonVolumes(mdsConfig.DataPathMap, mdsConfig.ResourceName),
+			HostNetwork:       c.clusterSpec.Network.IsHost(),
+			PriorityClassName: c.fs.Spec.MetadataServer.PriorityClassName,
 		},
 	}
-	if c.clusterSpec.Network.IsHost() {
-		podSpec.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
-	}
+	// Replace default unreachable node toleration
+	k8sutil.AddUnreachableNodeToleration(&podSpec.Spec)
+
 	c.fs.Spec.MetadataServer.Annotations.ApplyToObjectMeta(&podSpec.ObjectMeta)
 	c.fs.Spec.MetadataServer.Placement.ApplyToPodSpec(&podSpec.Spec)
 
@@ -80,18 +81,25 @@ func (c *Cluster) makeDeployment(mdsConfig *mdsConfig) *apps.Deployment {
 			},
 		},
 	}
+
+	if c.clusterSpec.Network.IsHost() {
+		d.Spec.Template.Spec.DNSPolicy = v1.DNSClusterFirstWithHostNet
+	} else if c.clusterSpec.Network.NetworkSpec.IsMultus() {
+		k8sutil.ApplyMultus(c.clusterSpec.Network.NetworkSpec, &podSpec.ObjectMeta)
+	}
+
 	k8sutil.AddRookVersionLabelToDeployment(d)
 	c.fs.Spec.MetadataServer.Annotations.ApplyToObjectMeta(&d.ObjectMeta)
-	opspec.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, d)
-	k8sutil.SetOwnerRefs(&d.ObjectMeta, c.ownerRefs)
+	controller.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, d)
+
 	return d
 }
 
 func (c *Cluster) makeChownInitContainer(mdsConfig *mdsConfig) v1.Container {
-	return opspec.ChownCephDataDirsInitContainer(
+	return controller.ChownCephDataDirsInitContainer(
 		*mdsConfig.DataPathMap,
 		c.clusterSpec.CephVersion.Image,
-		opspec.DaemonVolumeMounts(mdsConfig.DataPathMap, mdsConfig.ResourceName),
+		controller.DaemonVolumeMounts(mdsConfig.DataPathMap, mdsConfig.ResourceName),
 		c.fs.Spec.MetadataServer.Resources,
 		mon.PodSecurityContext(),
 	)
@@ -99,23 +107,9 @@ func (c *Cluster) makeChownInitContainer(mdsConfig *mdsConfig) v1.Container {
 
 func (c *Cluster) makeMdsDaemonContainer(mdsConfig *mdsConfig) v1.Container {
 	args := append(
-		opspec.DaemonFlags(c.clusterInfo, mdsConfig.DaemonID),
+		controller.DaemonFlags(c.clusterInfo, mdsConfig.DaemonID),
 		"--foreground",
 	)
-
-	// These flags are obsoleted as of Nautilus
-	if !c.clusterInfo.CephVersion.IsAtLeastNautilus() {
-		args = append(
-			args,
-			config.NewFlag("mds-standby-for-fscid", c.fsID),
-			config.NewFlag("mds-standby-replay", strconv.FormatBool(c.fs.Spec.MetadataServer.ActiveStandby)))
-	}
-
-	// Set mds cache memory limit to the best appropriate value
-	if !c.fs.Spec.MetadataServer.Resources.Limits.Memory().IsZero() {
-		mdsCacheMemoryLimit := float64(c.fs.Spec.MetadataServer.Resources.Limits.Memory().Value()) * mdsCacheMemoryLimitFactor
-		args = append(args, config.NewFlag("mds-cache-memory-limit", strconv.Itoa(int(mdsCacheMemoryLimit))))
-	}
 
 	container := v1.Container{
 		Name: "mds",
@@ -124,19 +118,20 @@ func (c *Cluster) makeMdsDaemonContainer(mdsConfig *mdsConfig) v1.Container {
 		},
 		Args:         args,
 		Image:        c.clusterSpec.CephVersion.Image,
-		VolumeMounts: opspec.DaemonVolumeMounts(mdsConfig.DataPathMap, mdsConfig.ResourceName),
+		VolumeMounts: controller.DaemonVolumeMounts(mdsConfig.DataPathMap, mdsConfig.ResourceName),
 		Env: append(
-			opspec.DaemonEnvVars(c.clusterSpec.CephVersion.Image),
+			controller.DaemonEnvVars(c.clusterSpec.CephVersion.Image),
 		),
 		Resources:       c.fs.Spec.MetadataServer.Resources,
 		SecurityContext: mon.PodSecurityContext(),
+		LivenessProbe:   controller.GenerateLivenessProbeExecDaemon(config.MdsType, mdsConfig.DaemonID),
 	}
 
 	return container
 }
 
 func (c *Cluster) podLabels(mdsConfig *mdsConfig) map[string]string {
-	labels := opspec.PodLabels(AppName, c.fs.Namespace, "mds", mdsConfig.DaemonID)
+	labels := controller.PodLabels(AppName, c.fs.Namespace, "mds", mdsConfig.DaemonID)
 	labels["rook_file_system"] = c.fs.Name
 	return labels
 }
@@ -145,7 +140,7 @@ func getMdsDeployments(context *clusterd.Context, namespace, fsName string) (*ap
 	fsLabelSelector := fmt.Sprintf("rook_file_system=%s", fsName)
 	deps, err := k8sutil.GetDeployments(context.Clientset, namespace, fsLabelSelector)
 	if err != nil {
-		return nil, fmt.Errorf("could not get deployments for filesystem %s (matching label selector '%s'): %+v", fsName, fsLabelSelector, err)
+		return nil, errors.Wrapf(err, "could not get deployments for filesystem %s (matching label selector %q)", fsName, fsLabelSelector)
 	}
 	return deps, nil
 }
@@ -157,7 +152,7 @@ func deleteMdsDeployment(context *clusterd.Context, namespace string, deployment
 	propagation := metav1.DeletePropagationForeground
 	options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
 	if err := context.Clientset.AppsV1().Deployments(namespace).Delete(deployment.GetName(), options); err != nil {
-		return fmt.Errorf("failed to delete mds deployment %s: %+v", deployment.GetName(), err)
+		return errors.Wrapf(err, "failed to delete mds deployment %s", deployment.GetName())
 	}
 	return nil
 }

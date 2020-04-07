@@ -65,11 +65,13 @@ func NewPodSpecTester(t *testing.T, spec *v1.PodSpec) *PodSpecTester {
 // AssertVolumesMeetCephRequirements asserts that all the required Ceph volumes exist in the pod
 // spec under test, Volumes list.
 func (ps *PodSpecTester) AssertVolumesMeetCephRequirements(
-	daemonType config.DaemonType, daemonID string,
+	daemonType, daemonID string,
 ) {
+	// #nosec because of the word `Secret`
 	keyringSecretName := fmt.Sprintf("rook-ceph-%s-%s-keyring", daemonType, daemonID)
 	if daemonType == config.MonType {
-		keyringSecretName = "rook-ceph-mons-keyring" // mons share a keyring
+		// #nosec because of the word `Secret`
+		keyringSecretName = "rook-ceph-mons-keyring"
 	}
 	requiredVols := []string{"rook-config-override", keyringSecretName}
 	if daemonType != config.RbdMirrorType {
@@ -115,17 +117,22 @@ func (ps *PodSpecTester) AssertRestartPolicyAlways() {
 
 // AssertChownContainer ensures that the init container to chown the Ceph data dir is present for
 // Ceph daemons.
-func (ps *PodSpecTester) AssertChownContainer(daemonType config.DaemonType) {
+func (ps *PodSpecTester) AssertChownContainer(daemonType string) {
 	switch daemonType {
 	case config.MonType, config.MgrType, config.OsdType, config.MdsType, config.RgwType, config.RbdMirrorType:
 		assert.True(ps.t, containerExists("chown-container-data-dir", ps.spec))
 	}
 }
 
+// AssertPriorityClassNameMatch asserts that the pod spec has priorityClassName set to be the same
+func (ps *PodSpecTester) AssertPriorityClassNameMatch(name string) {
+	assert.Equal(ps.t, name, ps.spec.PriorityClassName)
+}
+
 // RunFullSuite runs all assertion tests for the PodSpec under test and its sub-resources.
 func (ps *PodSpecTester) RunFullSuite(
-	daemonType config.DaemonType,
-	resourceName, cephImage, cpuResourceLimit, cpuResourceRequest, memoryResourceLimit, memoryResourceRequest string,
+	daemonType, resourceName, cephImage,
+	cpuResourceLimit, cpuResourceRequest, memoryResourceLimit, memoryResourceRequest string, priorityClassName string,
 ) {
 	resourceExpectations := optest.ResourceLimitExpectations{
 		CPUResourceLimit:      cpuResourceLimit,
@@ -139,6 +146,7 @@ func (ps *PodSpecTester) RunFullSuite(
 	ps.AssertVolumesMeetCephRequirements(daemonType, resourceName)
 	ps.AssertRestartPolicyAlways()
 	ps.AssertChownContainer(daemonType)
+	ps.AssertPriorityClassNameMatch(priorityClassName)
 	ps.Containers().RunFullSuite(cephImage, cpuResourceLimit, cpuResourceRequest, memoryResourceLimit, memoryResourceRequest)
 }
 

@@ -21,13 +21,13 @@ package v1
 import (
 	v1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/client/clientset/versioned/scheme"
-	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	rest "k8s.io/client-go/rest"
 )
 
 type CephV1Interface interface {
 	RESTClient() rest.Interface
 	CephBlockPoolsGetter
+	CephClientsGetter
 	CephClustersGetter
 	CephFilesystemsGetter
 	CephNFSesGetter
@@ -42,6 +42,10 @@ type CephV1Client struct {
 
 func (c *CephV1Client) CephBlockPools(namespace string) CephBlockPoolInterface {
 	return newCephBlockPools(c, namespace)
+}
+
+func (c *CephV1Client) CephClients(namespace string) CephClientInterface {
+	return newCephClients(c, namespace)
 }
 
 func (c *CephV1Client) CephClusters(namespace string) CephClusterInterface {
@@ -96,7 +100,7 @@ func setConfigDefaults(config *rest.Config) error {
 	gv := v1.SchemeGroupVersion
 	config.GroupVersion = &gv
 	config.APIPath = "/apis"
-	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: scheme.Codecs}
+	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 
 	if config.UserAgent == "" {
 		config.UserAgent = rest.DefaultKubernetesUserAgent()

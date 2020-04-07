@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
-	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	discoverDaemon "github.com/rook/rook/pkg/daemon/discover"
 	k8sutil "github.com/rook/rook/pkg/operator/k8sutil"
@@ -40,15 +40,17 @@ import (
 )
 
 const (
-	discoverDaemonsetName             = "rook-discover"
-	discoverDaemonsetTolerationEnv    = "DISCOVER_TOLERATION"
-	discoverDaemonsetTolerationKeyEnv = "DISCOVER_TOLERATION_KEY"
-	discoverDaemonsetTolerationsEnv   = "DISCOVER_TOLERATIONS"
-	discoverDaemonSetNodeAffinityEnv  = "DISCOVER_AGENT_NODE_AFFINITY"
-	deviceInUseCMName                 = "local-device-in-use-cluster-%s-node-%s"
-	deviceInUseAppName                = "rook-claimed-devices"
-	deviceInUseClusterAttr            = "rook.io/cluster"
-	discoverIntervalEnv               = "ROOK_DISCOVER_DEVICES_INTERVAL"
+	discoverDaemonsetName                 = "rook-discover"
+	discoverDaemonsetPriorityClassNameEnv = "DISCOVER_PRIORITY_CLASS_NAME"
+	discoverDaemonsetTolerationEnv        = "DISCOVER_TOLERATION"
+	discoverDaemonsetTolerationKeyEnv     = "DISCOVER_TOLERATION_KEY"
+	discoverDaemonsetTolerationsEnv       = "DISCOVER_TOLERATIONS"
+	discoverDaemonSetNodeAffinityEnv      = "DISCOVER_AGENT_NODE_AFFINITY"
+	deviceInUseCMName                     = "local-device-in-use-cluster-%s-node-%s"
+	deviceInUseAppName                    = "rook-claimed-devices"
+	deviceInUseClusterAttr                = "rook.io/cluster"
+	discoverIntervalEnv                   = "ROOK_DISCOVER_DEVICES_INTERVAL"
+	defaultDiscoverInterval               = "60m"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-discover")
@@ -66,17 +68,23 @@ func New(clientset kubernetes.Interface) *Discover {
 }
 
 // Start the discover
-func (d *Discover) Start(namespace, discoverImage, securityAccount string) error {
+func (d *Discover) Start(namespace, discoverImage, securityAccount string, useCephVolume bool) error {
 
-	err := d.createDiscoverDaemonSet(namespace, discoverImage, securityAccount)
+	err := d.createDiscoverDaemonSet(namespace, discoverImage, securityAccount, useCephVolume)
 	if err != nil {
 		return fmt.Errorf("Error starting discover daemonset: %v", err)
 	}
 	return nil
 }
 
-func (d *Discover) createDiscoverDaemonSet(namespace, discoverImage, securityAccount string) error {
+func (d *Discover) createDiscoverDaemonSet(namespace, discoverImage, securityAccount string, useCephVolume bool) error {
 	privileged := true
+	discovery_parameters := []string{"discover",
+		"--discover-interval", getEnvVar(discoverIntervalEnv, defaultDiscoverInterval)}
+	if useCephVolume {
+		discovery_parameters = append(discovery_parameters, "--use-ceph-volume")
+	}
+
 	ds := &apps.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: discoverDaemonsetName,
@@ -102,7 +110,7 @@ func (d *Discover) createDiscoverDaemonSet(namespace, discoverImage, securityAcc
 						{
 							Name:  discoverDaemonsetName,
 							Image: discoverImage,
-							Args:  []string{"discover", "--discover-interval", getDiscoverInterval()},
+							Args:  discovery_parameters,
 							SecurityContext: &v1.SecurityContext{
 								Privileged: &privileged,
 							},
@@ -127,6 +135,7 @@ func (d *Discover) createDiscoverDaemonSet(namespace, discoverImage, securityAcc
 							Env: []v1.EnvVar{
 								k8sutil.NamespaceEnvVar(),
 								k8sutil.NodeEnvVar(),
+								k8sutil.NameEnvVar(),
 							},
 						},
 					},
@@ -156,10 +165,18 @@ func (d *Discover) createDiscoverDaemonSet(namespace, discoverImage, securityAcc
 							},
 						},
 					},
-					HostNetwork: false,
+					HostNetwork:       false,
+					PriorityClassName: os.Getenv(discoverDaemonsetPriorityClassNameEnv),
 				},
 			},
 		},
+	}
+	// Get the operator pod details to attach the owner reference to the discover daemon set
+	operatorPod, err := k8sutil.GetRunningPod(d.clientset)
+	if err != nil {
+		logger.Errorf("failed to get operator pod. %+v", err)
+	} else {
+		k8sutil.SetOwnerRefsWithoutBlockOwner(&ds.ObjectMeta, operatorPod.OwnerReferences)
 	}
 
 	// Add toleration if any
@@ -211,13 +228,12 @@ func (d *Discover) createDiscoverDaemonSet(namespace, discoverImage, securityAcc
 
 }
 
-func getDiscoverInterval() string {
-	discoverValue := os.Getenv(discoverIntervalEnv)
-	if discoverValue != "" {
-		return discoverValue
+func getEnvVar(varName string, defaultValue string) string {
+	envValue := os.Getenv(varName)
+	if envValue != "" {
+		return envValue
 	}
-	// Default is 60 minutes
-	return "60m"
+	return defaultValue
 }
 
 // ListDevices lists all devices discovered on all nodes or specific node if node name is provided.
@@ -333,8 +349,8 @@ func matchDeviceFullPath(devLinks, fullpath string) bool {
 }
 
 // GetAvailableDevices conducts outer join using input filters with free devices that a node has. It marks the devices from join result as in-use.
-func GetAvailableDevices(context *clusterd.Context, nodeName, clusterName string, devices []rookalpha.Device, filter string, useAllDevices bool) ([]rookalpha.Device, error) {
-	results := []rookalpha.Device{}
+func GetAvailableDevices(context *clusterd.Context, nodeName, clusterName string, devices []rookv1.Device, filter string, useAllDevices bool) ([]rookv1.Device, error) {
+	results := []rookv1.Device{}
 	if len(devices) == 0 && len(filter) == 0 && !useAllDevices {
 		return results, nil
 	}
@@ -388,7 +404,7 @@ func GetAvailableDevices(context *clusterd.Context, nodeName, clusterName string
 			//TODO support filter based on other keys
 			matched, err := regexp.Match(filter, []byte(nodeDevices[i].Name))
 			if err == nil && matched {
-				d := rookalpha.Device{
+				d := rookv1.Device{
 					Name: nodeDevices[i].Name,
 				}
 				claimedDevices = append(claimedDevices, nodeDevices[i])
@@ -397,7 +413,7 @@ func GetAvailableDevices(context *clusterd.Context, nodeName, clusterName string
 		}
 	} else if useAllDevices {
 		for i := range nodeDevices {
-			d := rookalpha.Device{
+			d := rookv1.Device{
 				Name: nodeDevices[i].Name,
 			}
 			results = append(results, d)

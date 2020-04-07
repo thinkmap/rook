@@ -19,7 +19,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/rook/rook/pkg/daemon/ceph/model"
+	"github.com/pkg/errors"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 
@@ -39,11 +40,19 @@ func TestCreateProfileWithDeviceClass(t *testing.T) {
 }
 
 func testCreateProfile(t *testing.T, failureDomain, crushRoot, deviceClass string) {
-	cfg := model.ErasureCodedPoolConfig{DataChunkCount: 2, CodingChunkCount: 3, Algorithm: "myalg"}
+	spec := cephv1.PoolSpec{
+		FailureDomain: failureDomain,
+		CrushRoot:     crushRoot,
+		DeviceClass:   deviceClass,
+		ErasureCoded: cephv1.ErasureCodedSpec{
+			DataChunks:   2,
+			CodingChunks: 3,
+		},
+	}
 
 	executor := &exectest.MockExecutor{}
 	context := &clusterd.Context{Executor: executor}
-	executor.MockExecuteCommandWithOutputFile = func(debug bool, actionName, command, outputFile string, args ...string) (string, error) {
+	executor.MockExecuteCommandWithOutputFile = func(command, outputFile string, args ...string) (string, error) {
 		logger.Infof("Command: %s %v", command, args)
 		if args[1] == "erasure-code-profile" {
 			if args[2] == "get" {
@@ -52,8 +61,8 @@ func testCreateProfile(t *testing.T, failureDomain, crushRoot, deviceClass strin
 			}
 			if args[2] == "set" {
 				assert.Equal(t, "myapp", args[3])
-				assert.Equal(t, fmt.Sprintf("k=%d", cfg.DataChunkCount), args[4])
-				assert.Equal(t, fmt.Sprintf("m=%d", cfg.CodingChunkCount), args[5])
+				assert.Equal(t, fmt.Sprintf("k=%d", spec.ErasureCoded.DataChunks), args[4])
+				assert.Equal(t, fmt.Sprintf("m=%d", spec.ErasureCoded.CodingChunks), args[5])
 				assert.Equal(t, "plugin=myplugin", args[6])
 				assert.Equal(t, "technique=t", args[7])
 				nextArg := 8
@@ -72,9 +81,9 @@ func testCreateProfile(t *testing.T, failureDomain, crushRoot, deviceClass strin
 				return "", nil
 			}
 		}
-		return "", fmt.Errorf("unexpected ceph command '%v'", args)
+		return "", errors.Errorf("unexpected ceph command %q", args)
 	}
 
-	err := CreateErasureCodeProfile(context, "myns", cfg, "myapp", failureDomain, crushRoot, deviceClass)
+	err := CreateErasureCodeProfile(context, "myns", "myapp", spec)
 	assert.Nil(t, err)
 }

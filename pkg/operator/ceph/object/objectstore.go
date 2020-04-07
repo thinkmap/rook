@@ -19,10 +19,14 @@ package object
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/pkg/errors"
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	"github.com/rook/rook/pkg/daemon/ceph/client"
 	ceph "github.com/rook/rook/pkg/daemon/ceph/client"
-	"github.com/rook/rook/pkg/daemon/ceph/model"
+	"github.com/rook/rook/pkg/operator/ceph/config"
 )
 
 const (
@@ -41,9 +45,7 @@ var (
 		"rgw.buckets.index",
 		"rgw.buckets.non-ec",
 	}
-	dataPools = []string{
-		"rgw.buckets.data",
-	}
+	dataPoolName = "rgw.buckets.data"
 )
 
 type idType struct {
@@ -54,29 +56,16 @@ type realmType struct {
 	Realms []string `json:"realms"`
 }
 
-func createObjectStore(context *Context, metadataSpec, dataSpec model.Pool, serviceIP string, port int32) error {
-	err := createPools(context, metadataSpec, dataSpec)
-	if err != nil {
-		return fmt.Errorf("failed to create object pools. %+v", err)
-	}
-
-	err = createRealm(context, serviceIP, port)
-	if err != nil {
-		return fmt.Errorf("failed to create object store realm. %+v", err)
-	}
-	return nil
-}
-
-func deleteRealmAndPools(context *Context, preservePoolsOnDelete bool) error {
+func deleteRealmAndPools(context *Context, spec cephv1.ObjectStoreSpec) error {
 	stores, err := getObjectStores(context)
 	if err != nil {
-		return fmt.Errorf("failed to detect object stores during deletion. %+v", err)
+		return errors.Wrapf(err, "failed to detect object stores during deletion")
 	}
 	logger.Infof("Found stores %v when deleting store %s", stores, context.Name)
 
 	err = deleteRealm(context)
 	if err != nil {
-		return fmt.Errorf("failed to delete realm. %+v", err)
+		return errors.Wrapf(err, "failed to delete realm")
 	}
 
 	lastStore := false
@@ -84,10 +73,10 @@ func deleteRealmAndPools(context *Context, preservePoolsOnDelete bool) error {
 		lastStore = true
 	}
 
-	if !preservePoolsOnDelete {
-		err = deletePools(context, lastStore)
+	if !spec.PreservePoolsOnDelete {
+		err = deletePools(context, spec, lastStore)
 		if err != nil {
-			return fmt.Errorf("failed to delete object store pools. %+v", err)
+			return errors.Wrapf(err, "failed to delete object store pools")
 		}
 	} else {
 		logger.Infof("PreservePoolsOnDelete is set in object store %s. Pools not deleted", context.Name)
@@ -95,7 +84,7 @@ func deleteRealmAndPools(context *Context, preservePoolsOnDelete bool) error {
 	return nil
 }
 
-func createRealm(context *Context, serviceIP string, port int32) error {
+func reconcileRealm(context *Context, serviceIP string, port int32) error {
 	zoneArg := fmt.Sprintf("--rgw-zone=%s", context.Name)
 	endpointArg := fmt.Sprintf("--endpoints=%s:%d", serviceIP, port)
 	updatePeriod := false
@@ -104,7 +93,7 @@ func createRealm(context *Context, serviceIP string, port int32) error {
 	defaultArg := ""
 	stores, err := getObjectStores(context)
 	if err != nil {
-		return fmt.Errorf("failed to get object stores. %+v", err)
+		return errors.Wrapf(err, "failed to get object stores")
 	}
 	if len(stores) == 0 {
 		defaultArg = "--default"
@@ -116,13 +105,13 @@ func createRealm(context *Context, serviceIP string, port int32) error {
 		updatePeriod = true
 		output, err = runAdminCommand(context, "realm", "create", defaultArg)
 		if err != nil {
-			return fmt.Errorf("failed to create rgw realm %s. %+v", context.Name, err)
+			return errors.Wrapf(err, "failed to create rgw realm %s", context.Name)
 		}
 	}
 
 	realmID, err := decodeID(output)
 	if err != nil {
-		return fmt.Errorf("failed to parse realm id. %+v", err)
+		return errors.Wrapf(err, "failed to parse realm id")
 	}
 
 	// create the zonegroup if it doesn't exist yet
@@ -131,13 +120,13 @@ func createRealm(context *Context, serviceIP string, port int32) error {
 		updatePeriod = true
 		output, err = runAdminCommand(context, "zonegroup", "create", "--master", endpointArg, defaultArg)
 		if err != nil {
-			return fmt.Errorf("failed to create rgw zonegroup for %s. %+v", context.Name, err)
+			return errors.Wrapf(err, "failed to create rgw zonegroup for %s", context.Name)
 		}
 	}
 
 	zoneGroupID, err := decodeID(output)
 	if err != nil {
-		return fmt.Errorf("failed to parse zone group id. %+v", err)
+		return errors.Wrapf(err, "failed to parse zone group id")
 	}
 
 	// create the zone if it doesn't exist yet
@@ -146,19 +135,19 @@ func createRealm(context *Context, serviceIP string, port int32) error {
 		updatePeriod = true
 		output, err = runAdminCommand(context, "zone", "create", "--master", endpointArg, zoneArg, defaultArg)
 		if err != nil {
-			return fmt.Errorf("failed to create rgw zonegroup for %s. %+v", context.Name, err)
+			return errors.Wrapf(err, "failed to create rgw zonegroup for %s", context.Name)
 		}
 	}
 	zoneID, err := decodeID(output)
 	if err != nil {
-		return fmt.Errorf("failed to parse zone id. %+v", err)
+		return errors.Wrapf(err, "failed to parse zone id")
 	}
 
 	if updatePeriod {
 		// the period will help notify other zones of changes if there are multi-zones
 		_, err := runAdminCommandNoRealm(context, "period", "update", "--commit")
 		if err != nil {
-			return fmt.Errorf("failed to update period. %+v", err)
+			return errors.Wrapf(err, "failed to update period")
 		}
 	}
 
@@ -170,17 +159,17 @@ func deleteRealm(context *Context) error {
 	//  <name>
 	_, err := runAdminCommand(context, "realm", "delete", "--rgw-realm", context.Name)
 	if err != nil {
-		logger.Warningf("failed to delete rgw realm %s. %+v", context.Name, err)
+		logger.Warningf("failed to delete rgw realm %q. %v", context.Name, err)
 	}
 
 	_, err = runAdminCommand(context, "zonegroup", "delete", "--rgw-zonegroup", context.Name)
 	if err != nil {
-		logger.Warningf("failed to delete rgw zonegroup %s. %+v", context.Name, err)
+		logger.Warningf("failed to delete rgw zonegroup %q. %v", context.Name, err)
 	}
 
 	_, err = runAdminCommand(context, "zone", "delete", "--rgw-zone", context.Name)
 	if err != nil {
-		logger.Warningf("failed to delete rgw zone %s. %+v", context.Name, err)
+		logger.Warningf("failed to delete rgw zone %q. %v", context.Name, err)
 	}
 
 	return nil
@@ -190,7 +179,7 @@ func decodeID(data string) (string, error) {
 	var id idType
 	err := json.Unmarshal([]byte(data), &id)
 	if err != nil {
-		return "", fmt.Errorf("Failed to unmarshal json: %+v", err)
+		return "", errors.Wrapf(err, "Failed to unmarshal json")
 	}
 
 	return id.ID, err
@@ -208,14 +197,19 @@ func getObjectStores(context *Context) ([]string, error) {
 	var r realmType
 	err = json.Unmarshal([]byte(output), &r)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to unmarshal realms: %+v", err)
+		return nil, errors.Wrapf(err, "Failed to unmarshal realms")
 	}
 
 	return r.Realms, nil
 }
 
-func deletePools(context *Context, lastStore bool) error {
-	pools := append(metadataPools, dataPools...)
+func deletePools(context *Context, spec cephv1.ObjectStoreSpec, lastStore bool) error {
+	if emptyPool(spec.DataPool) && emptyPool(spec.MetadataPool) {
+		logger.Info("skipping removal of pools since not specified in the object store")
+		return nil
+	}
+
+	pools := append(metadataPools, dataPoolName)
 	if lastStore {
 		pools = append(pools, rootPool)
 	}
@@ -223,21 +217,21 @@ func deletePools(context *Context, lastStore bool) error {
 	for _, pool := range pools {
 		name := poolName(context.Name, pool)
 		if err := ceph.DeletePool(context.Context, context.ClusterName, name); err != nil {
-			logger.Warningf("failed to delete pool %s. %+v", name, err)
+			logger.Warningf("failed to delete pool %q. %v", name, err)
 		}
 	}
 
 	// Delete erasure code profile if any
 	erasureCodes, err := ceph.ListErasureCodeProfiles(context.Context, context.ClusterName)
 	if err != nil {
-		return fmt.Errorf("failed to list erasure code profiles for cluster %s: %+v", context.ClusterName, err)
+		return errors.Wrapf(err, "failed to list erasure code profiles for cluster %s", context.ClusterName)
 	}
 	// cleans up the EC profile for the data pool only. Metadata pools don't support EC (only replication is supported).
-	objectStoreErasureCode := ceph.GetErasureCodeProfileForPool(context.Name)
+	ecProfileName := client.GetErasureCodeProfileForPool(context.Name)
 	for i := range erasureCodes {
-		if erasureCodes[i] == objectStoreErasureCode {
-			if err := ceph.DeleteErasureCodeProfile(context.Context, context.ClusterName, objectStoreErasureCode); err != nil {
-				return fmt.Errorf("failed to delete erasure code profile %s for object store %s: %+v", objectStoreErasureCode, context.Name, err)
+		if erasureCodes[i] == ecProfileName {
+			if err := ceph.DeleteErasureCodeProfile(context.Context, context.ClusterName, ecProfileName); err != nil {
+				return errors.Wrapf(err, "failed to delete erasure code profile %s for object store %s", ecProfileName, context.Name)
 			}
 			break
 		}
@@ -246,47 +240,86 @@ func deletePools(context *Context, lastStore bool) error {
 	return nil
 }
 
-func createPools(context *Context, metadataSpec, dataSpec model.Pool) error {
-	if err := createSimilarPools(context, append(metadataPools, rootPool), metadataSpec); err != nil {
-		return fmt.Errorf("failed to create metadata pools. %+v", err)
+func createPools(context *Context, spec cephv1.ObjectStoreSpec) error {
+	if emptyPool(spec.DataPool) && emptyPool(spec.MetadataPool) {
+		logger.Info("no pools specified for the object store, checking for their existence...")
+		pools := append(metadataPools, dataPoolName)
+		pools = append(pools, rootPool)
+		var missingPools []string
+		for _, pool := range pools {
+			poolName := poolName(context.Name, pool)
+			_, err := ceph.GetPoolDetails(context.Context, context.ClusterName, poolName)
+			if err != nil {
+				logger.Debugf("failed to find pool %q. %v", poolName, err)
+				missingPools = append(missingPools, poolName)
+			}
+		}
+		if len(missingPools) > 0 {
+			return fmt.Errorf("object store pools are missing: %v", missingPools)
+		}
 	}
 
-	if err := createSimilarPools(context, dataPools, dataSpec); err != nil {
-		return fmt.Errorf("failed to create data pool. %+v", err)
+	// get the default PG count for rgw metadata pools
+	metadataPoolPGs, err := config.GetMonStore(context.Context, context.ClusterName).Get("mon.", "rgw_rados_pool_pg_num_min")
+	if err != nil {
+		logger.Warningf("failed to adjust the PG count for rgw metadata pools. using the general default. %v", err)
+		metadataPoolPGs = ceph.DefaultPGCount
+	}
+
+	if err := createSimilarPools(context, append(metadataPools, rootPool), spec.MetadataPool, metadataPoolPGs, ""); err != nil {
+		return errors.Wrapf(err, "failed to create metadata pools")
+	}
+
+	ecProfileName := ""
+	if spec.DataPool.IsErasureCoded() {
+		ecProfileName = client.GetErasureCodeProfileForPool(context.Name)
+		// create a new erasure code profile for the data pool
+		if err := ceph.CreateErasureCodeProfile(context.Context, context.ClusterName, ecProfileName, spec.DataPool); err != nil {
+			return errors.Wrapf(err, "failed to create erasure code profile for object store %s", context.Name)
+		}
+	}
+
+	if err := createSimilarPools(context, []string{dataPoolName}, spec.DataPool, ceph.DefaultPGCount, ecProfileName); err != nil {
+		return errors.Wrapf(err, "failed to create data pool")
 	}
 
 	return nil
 }
 
-func createSimilarPools(context *Context, pools []string, poolSpec model.Pool) error {
-	poolSpec.Name = context.Name
-	cephConfig := ceph.ModelPoolToCephPool(poolSpec)
-	isECPool := cephConfig.ErasureCodeProfile != ""
-	if isECPool {
-		// create a new erasure code profile for the new pool
-		if err := ceph.CreateErasureCodeProfile(context.Context, context.ClusterName, poolSpec.ErasureCodedConfig, cephConfig.ErasureCodeProfile,
-			poolSpec.FailureDomain, poolSpec.CrushRoot, poolSpec.DeviceClass); err != nil {
-			return fmt.Errorf("failed to create erasure code profile for object store %s: %+v", context.Name, err)
-		}
-	}
-
+func createSimilarPools(context *Context, pools []string, poolSpec cephv1.PoolSpec, pgCount, ecProfileName string) error {
 	for _, pool := range pools {
 		// create the pool if it doesn't exist yet
 		name := poolName(context.Name, pool)
-		if _, err := ceph.GetPoolDetails(context.Context, context.ClusterName, name); err != nil {
-			cephConfig.Name = name
+		if poolDetails, err := ceph.GetPoolDetails(context.Context, context.ClusterName, name); err != nil {
 			// If the ceph config has an EC profile, an EC pool must be created. Otherwise, it's necessary
 			// to create a replicated pool.
 			var err error
-			if isECPool {
+			if poolSpec.IsErasureCoded() {
 				// An EC pool backing an object store does not need to enable EC overwrites, so the pool is
 				// created with that property disabled to avoid unnecessary performance impact.
-				err = ceph.CreateECPoolForApp(context.Context, context.ClusterName, cephConfig, AppName, false /* enableECOverwrite */, poolSpec.ErasureCodedConfig)
+				err = ceph.CreateECPoolForApp(context.Context, context.ClusterName, name, ecProfileName, poolSpec, pgCount, AppName, false /* enableECOverwrite */)
 			} else {
-				err = ceph.CreateReplicatedPoolForApp(context.Context, context.ClusterName, cephConfig, AppName)
+				err = ceph.CreateReplicatedPoolForApp(context.Context, context.ClusterName, name, poolSpec, pgCount, AppName)
 			}
 			if err != nil {
-				return fmt.Errorf("failed to create pool %s for object store %s", name, context.Name)
+				return errors.Wrapf(err, "failed to create pool %s for object store %s.", name, context.Name)
+			}
+		} else {
+			// pools already exist
+			if !poolSpec.IsErasureCoded() {
+				// detect if the replication is different from the pool details
+				if poolDetails.Size != poolSpec.Replicated.Size {
+					logger.Infof("pool size is changed from %d to %d", poolDetails.Size, poolSpec.Replicated.Size)
+					if err := ceph.SetPoolReplicatedSizeProperty(context.Context, context.ClusterName, poolDetails.Name, strconv.FormatUint(uint64(poolSpec.Replicated.Size), 10)); err != nil {
+						return errors.Wrapf(err, "failed to set size property to replicated pool %q to %d", poolDetails.Name, poolSpec.Replicated.Size)
+					}
+				}
+			}
+			if pgCount != ceph.DefaultPGCount {
+				err = ceph.SetPoolProperty(context.Context, context.ClusterName, name, "pg_num_min", pgCount)
+				if err != nil {
+					return errors.Wrapf(err, "failed to set pg_num_min on pool %q to %q", name, pgCount)
+				}
 			}
 		}
 	}

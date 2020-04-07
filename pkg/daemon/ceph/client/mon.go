@@ -17,8 +17,8 @@ package client
 
 import (
 	"encoding/json"
-	"fmt"
 
+	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
 )
 
@@ -29,17 +29,6 @@ type MonStatusResponse struct {
 	MonMap struct {
 		Mons []MonMapEntry `json:"mons"`
 	} `json:"monmap"`
-}
-
-// request to simplify deserialization of a test request
-type MonStatusRequest struct {
-	Prefix string   `json:"prefix"`
-	Format string   `json:"format"`
-	ID     int      `json:"id"`
-	Weight float32  `json:"weight"`
-	Pool   string   `json:"pool"`
-	Var    string   `json:"var"`
-	Args   []string `json:"args"`
 }
 
 // MonMapEntry represents an entry in the monitor map
@@ -61,50 +50,19 @@ type AddrvecEntry struct {
 }
 
 // GetMonQuorumStatus calls quorum_status mon_command
-func GetMonQuorumStatus(context *clusterd.Context, clusterName string, debug bool) (MonStatusResponse, error) {
+func GetMonQuorumStatus(context *clusterd.Context, clusterName string) (MonStatusResponse, error) {
 	args := []string{"quorum_status"}
 	cmd := NewCephCommand(context, clusterName, args)
-	cmd.Debug = debug
 	buf, err := cmd.Run()
 	if err != nil {
-		return MonStatusResponse{}, fmt.Errorf("mon quorum status failed. %+v", err)
+		return MonStatusResponse{}, errors.Wrapf(err, "mon quorum status failed")
 	}
 
 	var resp MonStatusResponse
 	err = json.Unmarshal(buf, &resp)
 	if err != nil {
-		return MonStatusResponse{}, fmt.Errorf("unmarshal failed: %+v.  raw buffer response: %s", err, buf)
+		return MonStatusResponse{}, errors.Wrapf(err, "unmarshal failed. raw buffer response: %s", buf)
 	}
 
 	return resp, nil
-}
-
-type MonTimeStatus struct {
-	Skew   map[string]MonTimeSkewStatus `json:"time_skew_status"`
-	Checks struct {
-		Epoch       int    `json:"epoch"`
-		Round       int    `json:"round"`
-		RoundStatus string `json:"round_status"`
-	} `json:"timechecks"`
-}
-
-type MonTimeSkewStatus struct {
-	Skew    json.Number `json:"skew"`
-	Latency json.Number `json:"latency"`
-	Health  string      `json:"health"`
-}
-
-func GetMonTimeStatus(context *clusterd.Context, clusterName string) (*MonTimeStatus, error) {
-	args := []string{"time-sync-status"}
-	buf, err := NewCephCommand(context, clusterName, args).Run()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get time sync status: %+v", err)
-	}
-
-	var timeStatus MonTimeStatus
-	if err := json.Unmarshal(buf, &timeStatus); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal time sync status response: %+v", err)
-	}
-
-	return &timeStatus, nil
 }

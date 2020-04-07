@@ -51,6 +51,8 @@ spec:
                   type: boolean
             skipUpgradeChecks:
               type: boolean
+            continueUpgradeAfterChecksEvenIfNotHealthy:
+              type: boolean
             mon:
               properties:
                 allowMultiplePerNode:
@@ -101,7 +103,7 @@ spec:
                             type: string
                           storeType:
                             type: string
-                            pattern: ^(filestore|bluestore)$
+                            pattern: ^(bluestore)$
                           databaseSizeMB:
                             type: string
                           walSizeMB:
@@ -116,12 +118,6 @@ spec:
                       useAllDevices:
                         type: boolean
                       deviceFilter: {}
-                      directories:
-                        type: array
-                        items:
-                          properties:
-                            path:
-                              type: string
                       devices:
                         type: array
                         items:
@@ -129,22 +125,12 @@ spec:
                             name:
                               type: string
                             config: {}
-                      location: {}
                       resources: {}
                   type: array
                 useAllDevices:
                   type: boolean
                 deviceFilter: {}
-                location: {}
-                directories:
-                  type: array
-                  items:
-                    properties:
-                      path:
-                        type: string
                 config: {}
-                topologyAware:
-                  type: boolean
                 storageClassDeviceSets: {}
             monitoring:
               properties:
@@ -164,6 +150,11 @@ spec:
                   type: boolean
             placement: {}
             resources: {}
+            cleanupPolicy:
+              properties:
+                deleteDataDirOnHosts:
+                  type: string
+                  pattern: ^$|^yes-really-destroy-data$
   additionalPrinterColumns:
     - name: DataDirHostPath
       type: string
@@ -221,15 +212,27 @@ spec:
                 replicated:
                   properties:
                     size:
-                      minimum: 1
+                      minimum: 0
                       maximum: 10
                       type: integer
                 erasureCoded:
                   properties:
                     dataChunks:
+                      minimum: 0
+                      maximum: 10
                       type: integer
                     codingChunks:
+                      minimum: 0
+                      maximum: 10
                       type: integer
+                compressionMode:
+                  type: string
+                  enum:
+                  - ""
+                  - none
+                  - passive
+                  - aggressive
+                  - force
             dataPools:
               type: array
               items:
@@ -239,15 +242,27 @@ spec:
                   replicated:
                     properties:
                       size:
-                        minimum: 1
+                        minimum: 0
                         maximum: 10
                         type: integer
                   erasureCoded:
                     properties:
                       dataChunks:
+                        minimum: 0
+                        maximum: 10
                         type: integer
                       codingChunks:
+                        minimum: 0
+                        maximum: 10
                         type: integer
+                  compressionMode:
+                    type: string
+                    enum:
+                    - ""
+                    - none
+                    - passive
+                    - aggressive
+                    - force
             preservePoolsOnDelete:
               type: boolean
   additionalPrinterColumns:
@@ -318,6 +333,8 @@ spec:
                 sslCertificateRef: {}
                 port:
                   type: integer
+                  minimum: 1
+                  maximum: 65535
                 securePort: {}
                 instances:
                   type: integer
@@ -338,6 +355,14 @@ spec:
                       type: integer
                     codingChunks:
                       type: integer
+                compressionMode:
+                  type: string
+                  enum:
+                  - ""
+                  - none
+                  - passive
+                  - aggressive
+                  - force
             dataPool:
               properties:
                 failureDomain:
@@ -352,6 +377,14 @@ spec:
                       type: integer
                     codingChunks:
                       type: integer
+                compressionMode:
+                  type: string
+                  enum:
+                  - ""
+                  - none
+                  - passive
+                  - aggressive
+                  - force
             preservePoolsOnDelete:
               type: boolean
 ---
@@ -385,6 +418,41 @@ spec:
     singular: cephblockpool
   scope: Namespaced
   version: v1
+  validation:
+    openAPIV3Schema:
+      properties:
+        spec:
+          properties:
+            failureDomain:
+                type: string
+            replicated:
+              properties:
+                size:
+                  type: integer
+                  minimum: 0
+                  maximum: 9
+                targetSizeRatio:
+                  type: number
+                requireSafeReplicaSize:
+                  type: boolean
+            erasureCoded:
+              properties:
+                dataChunks:
+                  type: integer
+                  minimum: 0
+                  maximum: 9
+                codingChunks:
+                  type: integer
+                  minimum: 0
+                  maximum: 9
+            compressionMode:
+              type: string
+              enum:
+              - ""
+              - none
+              - passive
+              - aggressive
+              - force
 ---
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
@@ -446,3 +514,23 @@ spec:
   subresources:
     status: {}
 ---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: cephclients.ceph.rook.io
+spec:
+  group: ceph.rook.io
+  names:
+    kind: CephClient
+    listKind: CephClientList
+    plural: cephclients
+    singular: cephclient
+  scope: Namespaced
+  version: v1
+  validation:
+    openAPIV3Schema:
+      properties:
+        spec:
+          properties:
+            caps:
+              type: object
